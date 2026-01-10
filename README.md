@@ -276,4 +276,5 @@ class TestMyHandler(TransactionTestCase, AsyncBotTestMixin):
 MIT
 
 ## Todos
-- [ ] Add tests
+- [x] Add tests
+- [ ] Tests with different Aiogram versions
