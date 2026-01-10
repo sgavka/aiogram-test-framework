@@ -107,6 +107,31 @@ class TestRequestCapture:
         assert len(edits) == 1
         assert edits[0].request_type == RequestType.EDIT_MESSAGE_TEXT
 
+    def test_get_edited_messages_with_chat_filter(self, capture):
+        """Test getting edited messages with chat filter."""
+        edit1 = CapturedRequest(
+            request_type=RequestType.EDIT_MESSAGE_TEXT,
+            params={"chat_id": 100, "text": "Edited 100"},
+        )
+        edit2 = CapturedRequest(
+            request_type=RequestType.EDIT_MESSAGE_TEXT,
+            params={"chat_id": 200, "text": "Edited 200"},
+        )
+        edit3 = CapturedRequest(
+            request_type=RequestType.EDIT_MESSAGE_TEXT,
+            params={"chat_id": 100, "text": "Edited 100 again"},
+        )
+        capture.add(edit1)
+        capture.add(edit2)
+        capture.add(edit3)
+
+        edits_100 = capture.get_edited_messages(chat_id=100)
+        assert len(edits_100) == 2
+        assert all(e.chat_id == 100 for e in edits_100)
+
+        edits_200 = capture.get_edited_messages(chat_id=200)
+        assert len(edits_200) == 1
+
     def test_get_deleted_messages(self, capture):
         """Test getting deleted messages."""
         delete = CapturedRequest(
@@ -118,6 +143,31 @@ class TestRequestCapture:
         deletes = capture.get_deleted_messages()
         assert len(deletes) == 1
         assert deletes[0].request_type == RequestType.DELETE_MESSAGE
+
+    def test_get_deleted_messages_with_chat_filter(self, capture):
+        """Test getting deleted messages with chat filter."""
+        delete1 = CapturedRequest(
+            request_type=RequestType.DELETE_MESSAGE,
+            params={"chat_id": 100, "message_id": 1},
+        )
+        delete2 = CapturedRequest(
+            request_type=RequestType.DELETE_MESSAGE,
+            params={"chat_id": 200, "message_id": 2},
+        )
+        delete3 = CapturedRequest(
+            request_type=RequestType.DELETE_MESSAGE,
+            params={"chat_id": 100, "message_id": 3},
+        )
+        capture.add(delete1)
+        capture.add(delete2)
+        capture.add(delete3)
+
+        deletes_100 = capture.get_deleted_messages(chat_id=100)
+        assert len(deletes_100) == 2
+        assert all(d.chat_id == 100 for d in deletes_100)
+
+        deletes_200 = capture.get_deleted_messages(chat_id=200)
+        assert len(deletes_200) == 1
 
     def test_get_callback_answers(self, capture):
         """Test getting callback answers."""
@@ -140,6 +190,31 @@ class TestRequestCapture:
 
         dices = capture.get_dice_sends()
         assert len(dices) == 1
+
+    def test_get_dice_sends_with_chat_filter(self, capture):
+        """Test getting dice sends with chat filter."""
+        dice1 = CapturedRequest(
+            request_type=RequestType.SEND_DICE,
+            params={"chat_id": 100},
+        )
+        dice2 = CapturedRequest(
+            request_type=RequestType.SEND_DICE,
+            params={"chat_id": 200},
+        )
+        dice3 = CapturedRequest(
+            request_type=RequestType.SEND_DICE,
+            params={"chat_id": 100},
+        )
+        capture.add(dice1)
+        capture.add(dice2)
+        capture.add(dice3)
+
+        dices_100 = capture.get_dice_sends(chat_id=100)
+        assert len(dices_100) == 2
+        assert all(d.chat_id == 100 for d in dices_100)
+
+        dices_200 = capture.get_dice_sends(chat_id=200)
+        assert len(dices_200) == 1
 
     def test_get_last_message(self, capture):
         """Test getting the last message."""

@@ -227,6 +227,29 @@ class TestMessageFactory:
 
         assert message.reply_markup is not None
 
+    def test_create_message_with_explicit_id(self):
+        """Test creating a message with explicit message_id."""
+        user = UserFactory.create()
+        message = MessageFactory.create(
+            text="Explicit ID",
+            from_user=user,
+            message_id=999,
+        )
+
+        assert message.message_id == 999
+
+    def test_create_message_with_explicit_date(self):
+        """Test creating a message with explicit date."""
+        user = UserFactory.create()
+        custom_date = datetime(2024, 1, 15, 12, 30, 0)
+        message = MessageFactory.create(
+            text="Explicit date",
+            from_user=user,
+            date=custom_date,
+        )
+
+        assert message.date == custom_date
+
 
 class TestCallbackQueryFactory:
     """Tests for CallbackQueryFactory."""
@@ -275,6 +298,31 @@ class TestCallbackQueryFactory:
 
         cb = CallbackQueryFactory.create(data="data", from_user=user)
         assert cb.id == "1"
+
+    def test_create_callback_with_explicit_id(self):
+        """Test creating a callback query with explicit callback_id."""
+        user = UserFactory.create()
+        callback = CallbackQueryFactory.create(
+            data="test_data",
+            from_user=user,
+            callback_id="custom_id_123",
+        )
+
+        assert callback.id == "custom_id_123"
+
+    def test_create_callback_with_explicit_id_and_message(self):
+        """Test creating a callback query with explicit callback_id and message."""
+        user = UserFactory.create()
+        message = MessageFactory.create(text="Button text", from_user=user)
+        callback = CallbackQueryFactory.create(
+            data="test_data",
+            from_user=user,
+            callback_id="custom_id",
+            message=message,
+        )
+
+        assert callback.id == "custom_id"
+        assert callback.message == message
 
 
 class TestUpdateFactory:
@@ -349,6 +397,24 @@ class TestUpdateFactory:
 
         update = UpdateFactory.create_message_update(msg)
         assert update.update_id == 1
+
+    def test_create_message_update_with_explicit_id(self):
+        """Test creating a message update with explicit update_id."""
+        user = UserFactory.create()
+        message = MessageFactory.create(text="Test", from_user=user)
+        update = UpdateFactory.create_message_update(message, update_id=999)
+
+        assert update.update_id == 999
+        assert update.message == message
+
+    def test_create_callback_update_with_explicit_id(self):
+        """Test creating a callback update with explicit update_id."""
+        user = UserFactory.create()
+        callback = CallbackQueryFactory.create(data="data", from_user=user)
+        update = UpdateFactory.create_callback_update(callback, update_id=888)
+
+        assert update.update_id == 888
+        assert update.callback_query == callback
 
 
 class TestKeyboardFactory:

@@ -224,6 +224,48 @@ class TestMockSession:
 
         assert response is True
 
+    async def test_unknown_method_returns_other_request_type(self, session, capture, bot_user):
+        """Test that unknown methods get RequestType.OTHER."""
+        from aiogram.methods import SetWebhook
+
+        bot = MockBot(
+            capture=capture,
+            token="123:ABC",
+            bot_id=123456,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+        )
+
+        method = SetWebhook(url="https://example.com/webhook")
+        await session.make_request(bot, method)
+
+        assert len(capture) == 1
+        assert capture.all_requests[0].request_type == RequestType.OTHER
+
+    async def test_send_photo(self, session, capture, bot_user):
+        """Test that make_request handles sendPhoto."""
+        from aiogram.types import FSInputFile
+
+        bot = MockBot(
+            capture=capture,
+            token="123:ABC",
+            bot_id=123456,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+        )
+
+        method = SendPhoto(chat_id=100, photo="photo_file_id", caption="Test caption")
+        response = await session.make_request(bot, method)
+
+        assert isinstance(response, Message)
+        assert response.chat.id == 100
+        assert response.photo is not None
+        assert len(response.photo) == 1
+        assert response.caption == "Test caption"
+        assert response.from_user == bot_user
+        assert len(capture) == 1
+        assert capture.all_requests[0].request_type == RequestType.SEND_PHOTO
+
 
 class TestMockBot:
     """Tests for MockBot."""
