@@ -23,9 +23,13 @@ jobs:
         python-version: ['3.10', '3.11', '3.12', '3.13']
         aiogram-version: ['3.0.0', '3.7.0', '3.24.0']
         exclude:
-          # aiogram 3.0.0 doesn't support Python 3.13
+          # aiogram 3.0.0 doesn't support Python 3.12+ (old aiohttp incompatible)
+          - python-version: '3.12'
+            aiogram-version: '3.0.0'
           - python-version: '3.13'
             aiogram-version: '3.0.0'
+          - python-version: '3.13'
+            aiogram-version: '3.7.0'
     steps:
       - uses: actions/checkout@v4
 
