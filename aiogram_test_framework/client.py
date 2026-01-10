@@ -317,7 +317,21 @@ class TestClient:
 
     async def close(self) -> None:
         """Close the client and clean up resources."""
+        # Reset all routers so they can be reused in next test
+        self._reset_dispatcher_routers(self._dispatcher)
         await self._dispatcher.emit_shutdown()
+
+    def _reset_dispatcher_routers(self, router: Any) -> None:
+        """
+        Recursively reset parent references for all routers.
+
+        This allows routers (which are module-level singletons) to be
+        attached to a new dispatcher in subsequent tests.
+        """
+        for sub_router in router.sub_routers:
+            sub_router._parent_router = None
+            # Recursively handle nested routers
+            self._reset_dispatcher_routers(sub_router)
 
     async def __aenter__(self) -> "TestClient":
         """Async context manager entry."""
