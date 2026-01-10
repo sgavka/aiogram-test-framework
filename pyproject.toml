@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aiogram-test-framework"
+version = "0.1.0"
+description = "A testing framework for Aiogram 3.x Telegram bots"
+readme = "README.md"
+license = {text = "MIT"}
+    {name = "sgavka"}
+]
+keywords = [
+    "aiogram",
+    "telegram",
+    "bot",
+    "testing",
+    "test-framework",
+    "mock",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Framework :: AsyncIO",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Testing :: Mocking",
+    "Typing :: Typed",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "aiogram>=3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/sgavka/aiogram-test-framework"
+Repository = "https://github.com/sgavka/aiogram-test-framework"
+Issues = "https://github.com/sgavka/aiogram-test-framework/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["aiogram_test_framework*"]
+
+[tool.setuptools.package-data]
+aiogram_test_framework = ["py.typed"]
