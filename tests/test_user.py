@@ -25,6 +25,10 @@ def create_test_dispatcher(bot: Bot, dispatcher: Dispatcher) -> None:
         name = message.from_user.first_name if message.from_user else "User"
         await message.answer(f"Hello, {name}!")
 
+    @router.message(lambda m: m.dice is not None)
+    async def dice_handler(message: Message) -> None:
+        await message.answer(f"You rolled: {message.dice.value}")
+
     @router.message()
     async def echo_handler(message: Message) -> None:
         await message.answer(f"Echo: {message.text}")
@@ -162,3 +166,27 @@ class TestTestUser:
         user.change_client(client)
 
         assert user._client == client
+
+    async def test_send_dice_random(self, client):
+        """Test sending a dice with random value."""
+        user = client.create_user()
+        responses = await user.send_dice()
+
+        assert len(responses) == 1
+        assert "You rolled:" in responses[0].text
+
+    async def test_send_dice_specific_value(self, client):
+        """Test sending a dice with a specific value."""
+        user = client.create_user()
+        responses = await user.send_dice(value=6)
+
+        assert len(responses) == 1
+        assert "You rolled: 6" in responses[0].text
+
+    async def test_send_dice_with_emoji(self, client):
+        """Test sending a dice with different emoji."""
+        user = client.create_user()
+        responses = await user.send_dice(value=3, emoji="🎯")
+
+        assert len(responses) == 1
+        assert "You rolled: 3" in responses[0].text

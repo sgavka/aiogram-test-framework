@@ -250,6 +250,85 @@ class TestMessageFactory:
 
         assert message.date == custom_date
 
+    def test_create_dice_with_defaults(self):
+        """Test creating a dice message with default values (random)."""
+        user = UserFactory.create()
+        message = MessageFactory.create_dice(from_user=user)
+
+        assert message.dice is not None
+        assert message.dice.emoji == "🎲"
+        assert 1 <= message.dice.value <= 6  # Random value in range
+        assert message.from_user == user
+
+    def test_create_dice_with_specific_value(self):
+        """Test creating a dice message with specific value."""
+        user = UserFactory.create()
+        message = MessageFactory.create_dice(from_user=user, value=6)
+
+        assert message.dice.value == 6
+        assert message.dice.emoji == "🎲"
+
+    def test_create_dice_with_emoji(self):
+        """Test creating a dice message with different emoji."""
+        user = UserFactory.create()
+        message = MessageFactory.create_dice(from_user=user, value=3, emoji="🎯")
+
+        assert message.dice.value == 3
+        assert message.dice.emoji == "🎯"
+
+    def test_create_dice_basketball_random(self):
+        """Test basketball dice has correct random range."""
+        user = UserFactory.create()
+        message = MessageFactory.create_dice(from_user=user, emoji="🏀")
+
+        assert 1 <= message.dice.value <= 5  # Basketball range is 1-5
+
+    def test_create_dice_slot_machine_random(self):
+        """Test slot machine dice has correct random range."""
+        user = UserFactory.create()
+        message = MessageFactory.create_dice(from_user=user, emoji="🎰")
+
+        assert 1 <= message.dice.value <= 64  # Slot machine range is 1-64
+
+    def test_create_dice_validates_value_too_high(self):
+        """Test that dice value validation raises error for too high value."""
+        user = UserFactory.create()
+        with pytest.raises(ValueError) as exc_info:
+            MessageFactory.create_dice(from_user=user, value=7, emoji="🎲")
+        assert "out of range" in str(exc_info.value)
+        assert "1-6" in str(exc_info.value)
+
+    def test_create_dice_validates_value_too_low(self):
+        """Test that dice value validation raises error for too low value."""
+        user = UserFactory.create()
+        with pytest.raises(ValueError) as exc_info:
+            MessageFactory.create_dice(from_user=user, value=0, emoji="🎲")
+        assert "out of range" in str(exc_info.value)
+
+    def test_create_dice_validates_basketball_value(self):
+        """Test that basketball dice validates value correctly."""
+        user = UserFactory.create()
+        # Valid value should work
+        message = MessageFactory.create_dice(from_user=user, value=5, emoji="🏀")
+        assert message.dice.value == 5
+
+        # Invalid value should raise
+        with pytest.raises(ValueError) as exc_info:
+            MessageFactory.create_dice(from_user=user, value=6, emoji="🏀")
+        assert "1-5" in str(exc_info.value)
+
+    def test_create_dice_validates_slot_machine_value(self):
+        """Test that slot machine dice validates value correctly."""
+        user = UserFactory.create()
+        # Valid max value should work
+        message = MessageFactory.create_dice(from_user=user, value=64, emoji="🎰")
+        assert message.dice.value == 64
+
+        # Invalid value should raise
+        with pytest.raises(ValueError) as exc_info:
+            MessageFactory.create_dice(from_user=user, value=65, emoji="🎰")
+        assert "1-64" in str(exc_info.value)
+
 
 class TestCallbackQueryFactory:
     """Tests for CallbackQueryFactory."""
@@ -397,6 +476,31 @@ class TestUpdateFactory:
 
         update = UpdateFactory.create_message_update(msg)
         assert update.update_id == 1
+
+    def test_from_dice_random(self):
+        """Test creating an update from dice with random value."""
+        user = UserFactory.create()
+        update = UpdateFactory.from_dice(from_user=user)
+
+        assert update.message is not None
+        assert update.message.dice is not None
+        assert update.message.dice.emoji == "🎲"
+        assert 1 <= update.message.dice.value <= 6
+
+    def test_from_dice_specific_value(self):
+        """Test creating an update from dice with specific value."""
+        user = UserFactory.create()
+        update = UpdateFactory.from_dice(from_user=user, value=5)
+
+        assert update.message.dice.value == 5
+
+    def test_from_dice_with_emoji(self):
+        """Test creating an update from dice with different emoji."""
+        user = UserFactory.create()
+        update = UpdateFactory.from_dice(from_user=user, value=4, emoji="🎯")
+
+        assert update.message.dice.emoji == "🎯"
+        assert update.message.dice.value == 4
 
     def test_create_message_update_with_explicit_id(self):
         """Test creating a message update with explicit update_id."""

@@ -113,6 +113,28 @@ class TestUser:
             message=message,
         )
 
+    async def send_dice(
+        self,
+        value: Optional[int] = None,
+        emoji: str = "🎲",
+    ) -> list[CapturedRequest]:
+        """
+        Send a dice message to the bot.
+
+        Args:
+            value: Dice value (random if None, 1-6 for standard dice)
+            emoji: Dice emoji type (🎲, 🎯, 🏀, ⚽, 🎳, 🎰)
+
+        Returns:
+            List of captured requests (responses) from the bot
+        """
+        return await self._client.send_dice(
+            from_user=self._user,
+            value=value,
+            emoji=emoji,
+            chat=self._chat,
+        )
+
     def get_sent_messages(self) -> list[CapturedRequest]:
         """Get all messages sent by the bot to this user's chat."""
         return self._client.capture.get_sent_messages(chat_id=self.chat_id)

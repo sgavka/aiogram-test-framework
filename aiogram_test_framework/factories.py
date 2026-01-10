@@ -2,6 +2,7 @@
 Factories for creating mock Telegram objects for testing.
 """
 
+import random
 from datetime import datetime
 from typing import Optional, Any
 
@@ -14,6 +15,7 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    Dice,
 )
 
 
@@ -182,6 +184,91 @@ class MessageFactory:
         )
 
     @classmethod
+    def _get_dice_value_range(cls, emoji: str) -> tuple[int, int]:
+        """Get the valid value range for a dice emoji type."""
+        # 🎲 (dice), 🎯 (darts), 🎳 (bowling): 1-6
+        # 🏀 (basketball), ⚽ (football/soccer): 1-5
+        # 🎰 (slot machine): 1-64
+        if emoji in ("🏀", "⚽"):
+            return (1, 5)
+        elif emoji == "🎰":
+            return (1, 64)
+        else:  # 🎲, 🎯, 🎳 and others
+            return (1, 6)
+
+    @classmethod
+    def _get_random_dice_value(cls, emoji: str) -> int:
+        """Get a random dice value based on emoji type."""
+        min_val, max_val = cls._get_dice_value_range(emoji)
+        return random.randint(min_val, max_val)
+
+    @classmethod
+    def _validate_dice_value(cls, value: int, emoji: str) -> None:
+        """Validate that the dice value is within the valid range for the emoji."""
+        min_val, max_val = cls._get_dice_value_range(emoji)
+        if not (min_val <= value <= max_val):
+            raise ValueError(
+                f"Dice value {value} is out of range for emoji '{emoji}'. "
+                f"Valid range is {min_val}-{max_val}."
+            )
+
+    @classmethod
+    def create_dice(
+        cls,
+        from_user: User,
+        value: Optional[int] = None,
+        emoji: str = "🎲",
+        chat: Optional[Chat] = None,
+        message_id: Optional[int] = None,
+        date: Optional[datetime] = None,
+    ) -> Message:
+        """
+        Create a mock dice Message object.
+
+        Args:
+            from_user: User who sent the dice
+            value: Dice value (random if None). Valid ranges depend on emoji:
+                   🎲, 🎯, 🎳: 1-6; 🏀, ⚽: 1-5; 🎰: 1-64
+            emoji: Dice emoji type (🎲, 🎯, 🏀, ⚽, 🎳, 🎰)
+            chat: Chat where message was sent (auto-created from user if not provided)
+            message_id: Message ID (auto-generated if not provided)
+            date: Message date (defaults to now)
+
+        Returns:
+            Mock Message object with dice
+
+        Raises:
+            ValueError: If value is set and out of valid range for the emoji
+        """
+        if message_id is None:
+            message_id = cls._message_id_counter
+            cls._message_id_counter += 1
+
+        if chat is None:
+            chat = ChatFactory.create_private(
+                chat_id=from_user.id,
+                first_name=from_user.first_name,
+                last_name=from_user.last_name,
+                username=from_user.username,
+            )
+
+        if date is None:
+            date = datetime.now()
+
+        if value is None:
+            value = cls._get_random_dice_value(emoji)
+        else:
+            cls._validate_dice_value(value, emoji)
+
+        return Message(
+            message_id=message_id,
+            date=date,
+            chat=chat,
+            from_user=from_user,
+            dice=Dice(emoji=emoji, value=value),
+        )
+
+    @classmethod
     def reset_counter(cls) -> None:
         """Reset the message ID counter."""
         cls._message_id_counter = 1
@@ -317,6 +404,34 @@ class UpdateFactory:
             message=message,
         )
         return cls.create_callback_update(callback)
+
+    @classmethod
+    def from_dice(
+        cls,
+        from_user: User,
+        value: Optional[int] = None,
+        emoji: str = "🎲",
+        chat: Optional[Chat] = None,
+    ) -> Update:
+        """
+        Create an Update from a dice message.
+
+        Args:
+            from_user: User who sent the dice
+            value: Dice value (random if None, 1-6 for standard dice)
+            emoji: Dice emoji type (🎲, 🎯, 🏀, ⚽, 🎳, 🎰)
+            chat: Chat where message was sent
+
+        Returns:
+            Update with dice message
+        """
+        message = MessageFactory.create_dice(
+            from_user=from_user,
+            value=value,
+            emoji=emoji,
+            chat=chat,
+        )
+        return cls.create_message_update(message)
 
     @classmethod
     def reset_counter(cls) -> None:

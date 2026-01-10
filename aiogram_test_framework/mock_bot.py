@@ -25,12 +25,43 @@ class MockSession(BaseSession):
         self._capture = capture
         self._message_id_counter = 1
         self._bot_user: User = bot_user
+        self._next_dice_values: list[int] = []
 
     def _get_next_message_id(self) -> int:
         """Get the next message ID for responses."""
         msg_id = self._message_id_counter
         self._message_id_counter += 1
         return msg_id
+
+    def set_next_dice_value(self, value: int) -> None:
+        """
+        Set the value for the next dice roll.
+
+        The value will be used for the next sendDice call and then removed.
+        Multiple values can be queued by calling this method multiple times.
+
+        Args:
+            value: Dice value (1-6 for standard dice)
+        """
+        self._next_dice_values.append(value)
+
+    def _get_next_dice_value(self, emoji: str) -> int:
+        """Get the next dice value, or random based on emoji type."""
+        import random
+
+        if self._next_dice_values:
+            return self._next_dice_values.pop(0)
+
+        # Random value based on emoji type
+        # 🎲 (dice), 🎯 (darts), 🎳 (bowling): 1-6
+        # 🏀 (basketball), ⚽ (football/soccer): 1-5
+        # 🎰 (slot machine): 1-64
+        if emoji in ("🏀", "⚽"):
+            return random.randint(1, 5)
+        elif emoji == "🎰":
+            return random.randint(1, 64)
+        else:  # 🎲, 🎯, 🎳 and others
+            return random.randint(1, 6)
 
     def _method_to_request_type(self, method_name: str) -> RequestType:
         """Convert method name to RequestType enum."""
@@ -95,12 +126,13 @@ class MockSession(BaseSession):
 
         if method_name == "sendDice":
             chat_id = params.get("chat_id", 0)
+            emoji = params.get("emoji", "🎲")
             from aiogram.types import Dice
             return Message(
                 message_id=self._get_next_message_id(),
                 date=datetime.now(),
                 chat=Chat(id=chat_id, type="private"),
-                dice=Dice(emoji=params.get("emoji", "🎲"), value=1),
+                dice=Dice(emoji=emoji, value=self._get_next_dice_value(emoji)),
                 from_user=self._bot_user,
             )
 
@@ -213,3 +245,16 @@ class MockBot(Bot):
     def reset_message_counter(self) -> None:
         """Reset the message ID counter."""
         self._mock_session._message_id_counter = 1
+
+    def set_next_dice_value(self, value: int) -> None:
+        """
+        Set the value for the next dice roll.
+
+        The value will be used for the next sendDice call and then removed.
+        Multiple values can be queued by calling this method multiple times.
+
+        Args:
+            value: Dice value (1-6 for standard dice, different ranges for
+                   other emoji types like bowling, darts, etc.)
+        """
+        self._mock_session.set_next_dice_value(value)

@@ -277,6 +277,48 @@ class TestTestClientMessaging:
         await client.close()
 
 
+class TestTestClientDice:
+    """Tests for TestClient dice functionality."""
+
+    async def test_set_next_dice_value(self):
+        """Test setting next dice value."""
+        client = await TestClient.create(
+            bot_token="123456:ABC",
+            bot_id=123456,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+        )
+
+        client.set_next_dice_value(6)
+        result = await client.bot.send_dice(chat_id=100)
+
+        assert result.dice.value == 6
+
+        await client.close()
+
+    async def test_set_next_dice_value_queue(self):
+        """Test queuing multiple dice values."""
+        client = await TestClient.create(
+            bot_token="123456:ABC",
+            bot_id=123456,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+        )
+
+        client.set_next_dice_value(2)
+        client.set_next_dice_value(4)
+
+        result1 = await client.bot.send_dice(chat_id=100)
+        result2 = await client.bot.send_dice(chat_id=100)
+        result3 = await client.bot.send_dice(chat_id=100)  # Random
+
+        assert result1.dice.value == 2
+        assert result2.dice.value == 4
+        assert 1 <= result3.dice.value <= 6  # Falls back to random
+
+        await client.close()
+
+
 class TestTestClientReset:
     """Tests for TestClient reset functionality."""
 

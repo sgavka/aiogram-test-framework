@@ -261,6 +261,51 @@ class TestClient:
 
         return self._capture.all_requests[initial_count:]
 
+    async def send_dice(
+        self,
+        from_user: User,
+        value: Optional[int] = None,
+        emoji: str = "🎲",
+        chat: Optional[Chat] = None,
+    ) -> list[CapturedRequest]:
+        """
+        Send a dice message to the bot.
+
+        Args:
+            from_user: The user sending the dice
+            value: Dice value (random if None, 1-6 for standard dice)
+            emoji: Dice emoji type (🎲, 🎯, 🏀, ⚽, 🎳, 🎰)
+            chat: The chat where the dice is sent
+
+        Returns:
+            List of captured requests made by the bot
+        """
+        initial_count = len(self._capture)
+
+        update = UpdateFactory.from_dice(
+            from_user=from_user,
+            value=value,
+            emoji=emoji,
+            chat=chat,
+        )
+
+        await self._dispatcher.feed_update(bot=self._bot, update=update)
+
+        return self._capture.all_requests[initial_count:]
+
+    def set_next_dice_value(self, value: int) -> None:
+        """
+        Set the value for the next dice roll.
+
+        The value will be used for the next sendDice call and then removed.
+        Multiple values can be queued by calling this method multiple times.
+
+        Args:
+            value: Dice value (1-6 for standard dice, different ranges for
+                   other emoji types like bowling, darts, etc.)
+        """
+        self._bot.set_next_dice_value(value)
+
     def reset(self) -> None:
         """Reset the client state (clear captured requests and counters)."""
         self._capture.clear()

@@ -143,6 +143,67 @@ class TestMockSession:
         assert isinstance(response, Message)
         assert response.dice is not None
         assert isinstance(response.dice, Dice)
+        assert 1 <= response.dice.value <= 6  # Random value in valid range
+
+    async def test_make_request_send_dice_with_configured_value(self, session, capture, bot_user):
+        """Test that make_request uses configured dice value."""
+        bot = MockBot(
+            capture=capture,
+            token="123:ABC",
+            bot_id=123456,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+        )
+
+        session.set_next_dice_value(6)
+        method = SendDice(chat_id=100)
+        response = await session.make_request(bot, method)
+
+        assert isinstance(response, Message)
+        assert response.dice is not None
+        assert response.dice.value == 6
+
+    async def test_make_request_send_dice_queued_values(self, session, capture, bot_user):
+        """Test that multiple dice values can be queued."""
+        bot = MockBot(
+            capture=capture,
+            token="123:ABC",
+            bot_id=123456,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+        )
+
+        session.set_next_dice_value(3)
+        session.set_next_dice_value(5)
+        session.set_next_dice_value(2)
+
+        method = SendDice(chat_id=100)
+        response1 = await session.make_request(bot, method)
+        response2 = await session.make_request(bot, method)
+        response3 = await session.make_request(bot, method)
+        response4 = await session.make_request(bot, method)  # No more queued values
+
+        assert response1.dice.value == 3
+        assert response2.dice.value == 5
+        assert response3.dice.value == 2
+        assert 1 <= response4.dice.value <= 6  # Falls back to random
+
+    async def test_make_request_send_dice_with_emoji(self, session, capture, bot_user):
+        """Test that sendDice preserves emoji."""
+        bot = MockBot(
+            capture=capture,
+            token="123:ABC",
+            bot_id=123456,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+        )
+
+        session.set_next_dice_value(4)
+        method = SendDice(chat_id=100, emoji="🎳")
+        response = await session.make_request(bot, method)
+
+        assert response.dice.emoji == "🎳"
+        assert response.dice.value == 4
 
     async def test_make_request_get_chat(self, session, capture, bot_user):
         """Test that make_request handles getChat."""
@@ -335,3 +396,39 @@ class TestMockBot:
         bot._mock_session._message_id_counter = 100
         bot.reset_message_counter()
         assert bot._mock_session._message_id_counter == 1
+
+    async def test_set_next_dice_value(self, capture):
+        """Test setting next dice value through MockBot."""
+        bot = MockBot(
+            capture=capture,
+            token="123456:ABC-DEF",
+            bot_id=123456,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+        )
+
+        bot.set_next_dice_value(5)
+        result = await bot.send_dice(chat_id=100)
+
+        assert result.dice.value == 5
+
+    async def test_set_next_dice_value_multiple(self, capture):
+        """Test queuing multiple dice values through MockBot."""
+        bot = MockBot(
+            capture=capture,
+            token="123456:ABC-DEF",
+            bot_id=123456,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+        )
+
+        bot.set_next_dice_value(1)
+        bot.set_next_dice_value(6)
+
+        result1 = await bot.send_dice(chat_id=100)
+        result2 = await bot.send_dice(chat_id=100)
+        result3 = await bot.send_dice(chat_id=100)  # Random
+
+        assert result1.dice.value == 1
+        assert result2.dice.value == 6
+        assert 1 <= result3.dice.value <= 6  # Falls back to random
