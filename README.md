@@ -1,5 +1,10 @@
 # Aiogram Test Framework
 
+[![PyPI](https://img.shields.io/pypi/v/aiogram-test-framework)](https://pypi.org/project/aiogram-test-framework/)
+[![Python Versions](https://img.shields.io/pypi/pyversions/aiogram-test-framework)](https://pypi.org/project/aiogram-test-framework/)
+[![Downloads](https://img.shields.io/pypi/dm/aiogram-test-framework)](https://pypi.org/project/aiogram-test-framework/)
+[![License](https://img.shields.io/pypi/l/aiogram-test-framework)](https://pypi.org/project/aiogram-test-framework/)
+
 A testing framework for Aiogram 3.x Telegram bots that provides:
 
 - Mocking the Telegram Bot API
