@@ -40,6 +40,10 @@ jobs:
           pip install -e ".[dev]"
           pip install aiogram==${{ matrix.aiogram-version }}
 
+      - name: Fix typing_extensions for older aiogram
+        if: matrix.aiogram-version == '3.0.0'
+        run: pip install "typing_extensions>=4.10.0"
+
       - name: Show installed versions
         run: |
           python --version
