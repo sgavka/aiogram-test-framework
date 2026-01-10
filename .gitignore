@@ -9,3 +9,8 @@ __pycache__/
 *.pyc
 
 *.egg-info
+
+# Coverage
+.coverage
+coverage.xml
+htmlcov/

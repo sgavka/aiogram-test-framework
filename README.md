@@ -2,6 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/aiogram-test-framework)](https://pypi.org/project/aiogram-test-framework/)
 [![Python Versions](https://img.shields.io/pypi/pyversions/aiogram-test-framework)](https://pypi.org/project/aiogram-test-framework/)
+[![codecov](https://codecov.io/gh/sgavka/aiogram-test-framework/branch/master/graph/badge.svg)](https://codecov.io/gh/sgavka/aiogram-test-framework)
 [![Downloads](https://img.shields.io/pypi/dm/aiogram-test-framework)](https://pypi.org/project/aiogram-test-framework/)
 [![License](https://img.shields.io/pypi/l/aiogram-test-framework)](https://pypi.org/project/aiogram-test-framework/)
 
