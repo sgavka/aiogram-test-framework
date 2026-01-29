@@ -21,13 +21,9 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ['3.10', '3.11', '3.12', '3.13']
-        aiogram-version: ['3.0.0', '3.7.0', '3.24.0']
+        aiogram-version: ['3.4.0', '3.7.0', '3.24.0']
         exclude:
-          # aiogram 3.0.0 doesn't support Python 3.12+ (old aiohttp incompatible)
-          - python-version: '3.12'
-            aiogram-version: '3.0.0'
-          - python-version: '3.13'
-            aiogram-version: '3.0.0'
+          # aiogram 3.7.0 doesn't support Python 3.13
           - python-version: '3.13'
             aiogram-version: '3.7.0'
     steps:
@@ -43,10 +39,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
           pip install aiogram==${{ matrix.aiogram-version }}
-
-      - name: Fix typing_extensions for older aiogram
-        if: matrix.aiogram-version == '3.0.0'
-        run: pip install "typing_extensions>=4.10.0"
 
       - name: Show installed versions
         run: |
