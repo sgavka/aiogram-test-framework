@@ -26,6 +26,9 @@ jobs:
           # aiogram 3.7.0 doesn't support Python 3.13
           - python-version: '3.13'
             aiogram-version: '3.7.0'
+          # aiogram 3.4.0 doesn't support Python 3.13
+          - python-version: '3.13'
+            aiogram-version: '3.4.0'
     steps:
       - uses: actions/checkout@v4
 
