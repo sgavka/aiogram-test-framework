@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aiogram-test-framework"
-version = "1.0.1"
+version = "1.0.2"
 description = "A testing framework for Aiogram 3.x Telegram bots"
 readme = "README.md"
 license = {text = "MIT"}
