@@ -135,6 +135,103 @@ class TestUser:
             chat=self._chat,
         )
 
+    async def send_forwarded_from_user(
+        self,
+        text: str,
+        forward_from: User,
+    ) -> list[CapturedRequest]:
+        """
+        Send a forwarded message from another user.
+
+        Args:
+            text: Message text content
+            forward_from: The original sender of the message
+
+        Returns:
+            List of captured requests (responses) from the bot
+        """
+        return await self._client.send_forwarded_from_user(
+            text=text,
+            from_user=self._user,
+            forward_from=forward_from,
+            chat=self._chat,
+        )
+
+    async def send_forwarded_from_hidden_user(
+        self,
+        text: str,
+        sender_user_name: str,
+    ) -> list[CapturedRequest]:
+        """
+        Send a forwarded message from a hidden user.
+
+        Args:
+            text: Message text content
+            sender_user_name: Name of the hidden sender
+
+        Returns:
+            List of captured requests (responses) from the bot
+        """
+        return await self._client.send_forwarded_from_hidden_user(
+            text=text,
+            from_user=self._user,
+            sender_user_name=sender_user_name,
+            chat=self._chat,
+        )
+
+    async def send_forwarded_from_chat(
+        self,
+        text: str,
+        sender_chat: Chat,
+        author_signature: Optional[str] = None,
+    ) -> list[CapturedRequest]:
+        """
+        Send a forwarded message from a chat.
+
+        Args:
+            text: Message text content
+            sender_chat: Chat from which the message was originally sent
+            author_signature: Optional signature of the post author
+
+        Returns:
+            List of captured requests (responses) from the bot
+        """
+        return await self._client.send_forwarded_from_chat(
+            text=text,
+            from_user=self._user,
+            sender_chat=sender_chat,
+            chat=self._chat,
+            author_signature=author_signature,
+        )
+
+    async def send_forwarded_from_channel(
+        self,
+        text: str,
+        channel_chat: Chat,
+        channel_message_id: int,
+        author_signature: Optional[str] = None,
+    ) -> list[CapturedRequest]:
+        """
+        Send a forwarded message from a channel.
+
+        Args:
+            text: Message text content
+            channel_chat: Channel from which the message was forwarded
+            channel_message_id: Message ID in the original channel
+            author_signature: Optional signature of the post author
+
+        Returns:
+            List of captured requests (responses) from the bot
+        """
+        return await self._client.send_forwarded_from_channel(
+            text=text,
+            from_user=self._user,
+            channel_chat=channel_chat,
+            channel_message_id=channel_message_id,
+            chat=self._chat,
+            author_signature=author_signature,
+        )
+
     def get_sent_messages(self) -> list[CapturedRequest]:
         """Get all messages sent by the bot to this user's chat."""
         return self._client.capture.get_sent_messages(chat_id=self.chat_id)

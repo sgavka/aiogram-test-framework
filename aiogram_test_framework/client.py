@@ -13,7 +13,8 @@ from aiogram_test_framework.request_capture import RequestCapture
 from aiogram_test_framework.setup import create_test_dispatcher
 from aiogram_test_framework.types import CapturedRequest
 from aiogram_test_framework.factories import (
-    ChatFactory, UserFactory,
+    ChatFactory,
+    UserFactory,
     MessageFactory,
     CallbackQueryFactory,
     UpdateFactory,
@@ -287,6 +288,143 @@ class TestClient:
             value=value,
             emoji=emoji,
             chat=chat,
+        )
+
+        await self._dispatcher.feed_update(bot=self._bot, update=update)
+
+        return self._capture.all_requests[initial_count:]
+
+    async def send_forwarded_from_user(
+        self,
+        text: str,
+        from_user: User,
+        forward_from: User,
+        chat: Optional[Chat] = None,
+    ) -> list[CapturedRequest]:
+        """
+        Send a forwarded message from another user to the bot.
+
+        Args:
+            text: Message text content
+            from_user: The user who forwarded the message
+            forward_from: The original sender of the message
+            chat: The chat where the message is sent
+
+        Returns:
+            List of captured requests made by the bot
+        """
+        initial_count = len(self._capture)
+
+        update = UpdateFactory.from_forwarded_user(
+            text=text,
+            from_user=from_user,
+            forward_from=forward_from,
+            chat=chat,
+        )
+
+        await self._dispatcher.feed_update(bot=self._bot, update=update)
+
+        return self._capture.all_requests[initial_count:]
+
+    async def send_forwarded_from_hidden_user(
+        self,
+        text: str,
+        from_user: User,
+        sender_user_name: str,
+        chat: Optional[Chat] = None,
+    ) -> list[CapturedRequest]:
+        """
+        Send a forwarded message from a hidden user to the bot.
+
+        Args:
+            text: Message text content
+            from_user: The user who forwarded the message
+            sender_user_name: Name of the hidden sender
+            chat: The chat where the message is sent
+
+        Returns:
+            List of captured requests made by the bot
+        """
+        initial_count = len(self._capture)
+
+        update = UpdateFactory.from_forwarded_hidden_user(
+            text=text,
+            from_user=from_user,
+            sender_user_name=sender_user_name,
+            chat=chat,
+        )
+
+        await self._dispatcher.feed_update(bot=self._bot, update=update)
+
+        return self._capture.all_requests[initial_count:]
+
+    async def send_forwarded_from_chat(
+        self,
+        text: str,
+        from_user: User,
+        sender_chat: Chat,
+        chat: Optional[Chat] = None,
+        author_signature: Optional[str] = None,
+    ) -> list[CapturedRequest]:
+        """
+        Send a forwarded message from a chat to the bot.
+
+        Args:
+            text: Message text content
+            from_user: The user who forwarded the message
+            sender_chat: Chat from which the message was originally sent
+            chat: The chat where the message is sent
+            author_signature: Optional signature of the post author
+
+        Returns:
+            List of captured requests made by the bot
+        """
+        initial_count = len(self._capture)
+
+        update = UpdateFactory.from_forwarded_chat(
+            text=text,
+            from_user=from_user,
+            sender_chat=sender_chat,
+            chat=chat,
+            author_signature=author_signature,
+        )
+
+        await self._dispatcher.feed_update(bot=self._bot, update=update)
+
+        return self._capture.all_requests[initial_count:]
+
+    async def send_forwarded_from_channel(
+        self,
+        text: str,
+        from_user: User,
+        channel_chat: Chat,
+        channel_message_id: int,
+        chat: Optional[Chat] = None,
+        author_signature: Optional[str] = None,
+    ) -> list[CapturedRequest]:
+        """
+        Send a forwarded message from a channel to the bot.
+
+        Args:
+            text: Message text content
+            from_user: The user who forwarded the message
+            channel_chat: Channel from which the message was forwarded
+            channel_message_id: Message ID in the original channel
+            chat: The chat where the message is sent
+            author_signature: Optional signature of the post author
+
+        Returns:
+            List of captured requests made by the bot
+        """
+        initial_count = len(self._capture)
+
+        update = UpdateFactory.from_forwarded_channel(
+            text=text,
+            from_user=from_user,
+            channel_chat=channel_chat,
+            channel_message_id=channel_message_id,
+            chat=chat,
+            author_signature=author_signature,
         )
 
         await self._dispatcher.feed_update(bot=self._bot, update=update)

@@ -53,6 +53,13 @@ class RequestCapture:
             messages = [m for m in messages if m.chat_id == chat_id]
         return messages
 
+    def get_edited_reply_markups(self, chat_id: Optional[int] = None) -> list[CapturedRequest]:
+        """Get all editMessageReplyMarkup requests, optionally filtered by chat_id."""
+        messages = self.get_by_type(RequestType.EDIT_MESSAGE_REPLY_MARKUP)
+        if chat_id is not None:
+            messages = [m for m in messages if m.chat_id == chat_id]
+        return messages
+
     def get_deleted_messages(self, chat_id: Optional[int] = None) -> list[CapturedRequest]:
         """Get all deleteMessage requests, optionally filtered by chat_id."""
         messages = self.get_by_type(RequestType.DELETE_MESSAGE)

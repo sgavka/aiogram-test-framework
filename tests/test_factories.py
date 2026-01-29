@@ -10,6 +10,10 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    MessageOriginChannel,
+    MessageOriginChat,
+    MessageOriginHiddenUser,
+    MessageOriginUser,
     User,
 )
 
@@ -329,6 +333,78 @@ class TestMessageFactory:
             MessageFactory.create_dice(from_user=user, value=65, emoji="🎰")
         assert "1-64" in str(exc_info.value)
 
+    def test_create_forwarded_from_user(self):
+        """Test creating a message forwarded from another user."""
+        user = UserFactory.create()
+        original_sender = UserFactory.create(
+            first_name="Original",
+            last_name="Sender",
+        )
+        message = MessageFactory.create_forwarded_from_user(
+            text="Forwarded text",
+            from_user=user,
+            forward_from=original_sender,
+        )
+
+        assert message.text == "Forwarded text"
+        assert message.from_user == user
+        assert message.forward_origin is not None
+        assert isinstance(message.forward_origin, MessageOriginUser)
+        assert message.forward_origin.sender_user == original_sender
+
+    def test_create_forwarded_from_hidden_user(self):
+        """Test creating a message forwarded from a hidden user."""
+        user = UserFactory.create()
+        message = MessageFactory.create_forwarded_from_hidden_user(
+            text="Hidden forward",
+            from_user=user,
+            sender_user_name="Hidden Sender",
+        )
+
+        assert message.text == "Hidden forward"
+        assert message.from_user == user
+        assert message.forward_origin is not None
+        assert isinstance(message.forward_origin, MessageOriginHiddenUser)
+        assert message.forward_origin.sender_user_name == "Hidden Sender"
+
+    def test_create_forwarded_from_chat(self):
+        """Test creating a message forwarded from a chat."""
+        user = UserFactory.create()
+        sender_chat = ChatFactory.create_group(chat_id=-100123, title="Source Group")
+        message = MessageFactory.create_forwarded_from_chat(
+            text="Chat forward",
+            from_user=user,
+            sender_chat=sender_chat,
+            author_signature="Admin",
+        )
+
+        assert message.text == "Chat forward"
+        assert message.from_user == user
+        assert message.forward_origin is not None
+        assert isinstance(message.forward_origin, MessageOriginChat)
+        assert message.forward_origin.sender_chat == sender_chat
+        assert message.forward_origin.author_signature == "Admin"
+
+    def test_create_forwarded_from_channel(self):
+        """Test creating a message forwarded from a channel."""
+        user = UserFactory.create()
+        channel_chat = ChatFactory.create_group(chat_id=-1001234567890, title="Test Channel")
+        message = MessageFactory.create_forwarded_from_channel(
+            text="Channel forward",
+            from_user=user,
+            channel_chat=channel_chat,
+            channel_message_id=42,
+            author_signature="Editor",
+        )
+
+        assert message.text == "Channel forward"
+        assert message.from_user == user
+        assert message.forward_origin is not None
+        assert isinstance(message.forward_origin, MessageOriginChannel)
+        assert message.forward_origin.chat == channel_chat
+        assert message.forward_origin.message_id == 42
+        assert message.forward_origin.author_signature == "Editor"
+
 
 class TestCallbackQueryFactory:
     """Tests for CallbackQueryFactory."""
@@ -519,6 +595,75 @@ class TestUpdateFactory:
 
         assert update.update_id == 888
         assert update.callback_query == callback
+
+    def test_from_forwarded_user(self):
+        """Test creating an update from a forwarded user message."""
+        user = UserFactory.create()
+        original_sender = UserFactory.create(first_name="Original")
+        update = UpdateFactory.from_forwarded_user(
+            text="Forwarded text",
+            from_user=user,
+            forward_from=original_sender,
+        )
+
+        assert update.message is not None
+        assert update.message.text == "Forwarded text"
+        assert update.message.forward_origin is not None
+        assert isinstance(update.message.forward_origin, MessageOriginUser)
+        assert update.message.forward_origin.sender_user == original_sender
+
+    def test_from_forwarded_hidden_user(self):
+        """Test creating an update from a forwarded hidden user message."""
+        user = UserFactory.create()
+        update = UpdateFactory.from_forwarded_hidden_user(
+            text="Hidden forward",
+            from_user=user,
+            sender_user_name="Anonymous User",
+        )
+
+        assert update.message is not None
+        assert update.message.text == "Hidden forward"
+        assert update.message.forward_origin is not None
+        assert isinstance(update.message.forward_origin, MessageOriginHiddenUser)
+        assert update.message.forward_origin.sender_user_name == "Anonymous User"
+
+    def test_from_forwarded_chat(self):
+        """Test creating an update from a forwarded chat message."""
+        user = UserFactory.create()
+        sender_chat = ChatFactory.create_group(chat_id=-100123, title="Source Group")
+        update = UpdateFactory.from_forwarded_chat(
+            text="Chat forward",
+            from_user=user,
+            sender_chat=sender_chat,
+            author_signature="Admin",
+        )
+
+        assert update.message is not None
+        assert update.message.text == "Chat forward"
+        assert update.message.forward_origin is not None
+        assert isinstance(update.message.forward_origin, MessageOriginChat)
+        assert update.message.forward_origin.sender_chat == sender_chat
+        assert update.message.forward_origin.author_signature == "Admin"
+
+    def test_from_forwarded_channel(self):
+        """Test creating an update from a forwarded channel message."""
+        user = UserFactory.create()
+        channel_chat = ChatFactory.create_group(chat_id=-1001234567890, title="News Channel")
+        update = UpdateFactory.from_forwarded_channel(
+            text="Channel post",
+            from_user=user,
+            channel_chat=channel_chat,
+            channel_message_id=123,
+            author_signature="Editor",
+        )
+
+        assert update.message is not None
+        assert update.message.text == "Channel post"
+        assert update.message.forward_origin is not None
+        assert isinstance(update.message.forward_origin, MessageOriginChannel)
+        assert update.message.forward_origin.chat == channel_chat
+        assert update.message.forward_origin.message_id == 123
+        assert update.message.forward_origin.author_signature == "Editor"
 
 
 class TestKeyboardFactory:

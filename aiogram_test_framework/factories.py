@@ -16,6 +16,10 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     Dice,
+    MessageOriginUser,
+    MessageOriginHiddenUser,
+    MessageOriginChat,
+    MessageOriginChannel,
 )
 
 
@@ -269,6 +273,251 @@ class MessageFactory:
         )
 
     @classmethod
+    def create_forwarded_from_user(
+        cls,
+        text: str,
+        from_user: User,
+        forward_from: User,
+        chat: Optional[Chat] = None,
+        message_id: Optional[int] = None,
+        date: Optional[datetime] = None,
+        forward_date: Optional[datetime] = None,
+    ) -> Message:
+        """
+        Create a mock Message that was forwarded from another user.
+
+        Args:
+            text: Message text content
+            from_user: User who forwarded the message
+            forward_from: Original sender of the message
+            chat: Chat where message was sent (auto-created from user if not provided)
+            message_id: Message ID (auto-generated if not provided)
+            date: Message date (defaults to now)
+            forward_date: Date when original message was sent (defaults to now)
+
+        Returns:
+            Mock Message object with forward_origin
+        """
+        if message_id is None:
+            message_id = cls._message_id_counter
+            cls._message_id_counter += 1
+
+        if chat is None:
+            chat = ChatFactory.create_private(
+                chat_id=from_user.id,
+                first_name=from_user.first_name,
+                last_name=from_user.last_name,
+                username=from_user.username,
+            )
+
+        if date is None:
+            date = datetime.now()
+
+        if forward_date is None:
+            forward_date = datetime.now()
+
+        forward_origin = MessageOriginUser(
+            type="user",
+            date=forward_date,
+            sender_user=forward_from,
+        )
+
+        return Message(
+            message_id=message_id,
+            date=date,
+            chat=chat,
+            from_user=from_user,
+            text=text,
+            forward_origin=forward_origin,
+        )
+
+    @classmethod
+    def create_forwarded_from_hidden_user(
+        cls,
+        text: str,
+        from_user: User,
+        sender_user_name: str,
+        chat: Optional[Chat] = None,
+        message_id: Optional[int] = None,
+        date: Optional[datetime] = None,
+        forward_date: Optional[datetime] = None,
+    ) -> Message:
+        """
+        Create a mock Message that was forwarded from a user who hides their account.
+
+        Args:
+            text: Message text content
+            from_user: User who forwarded the message
+            sender_user_name: Name of the hidden sender
+            chat: Chat where message was sent (auto-created from user if not provided)
+            message_id: Message ID (auto-generated if not provided)
+            date: Message date (defaults to now)
+            forward_date: Date when original message was sent (defaults to now)
+
+        Returns:
+            Mock Message object with forward_origin (hidden user)
+        """
+        if message_id is None:
+            message_id = cls._message_id_counter
+            cls._message_id_counter += 1
+
+        if chat is None:
+            chat = ChatFactory.create_private(
+                chat_id=from_user.id,
+                first_name=from_user.first_name,
+                last_name=from_user.last_name,
+                username=from_user.username,
+            )
+
+        if date is None:
+            date = datetime.now()
+
+        if forward_date is None:
+            forward_date = datetime.now()
+
+        forward_origin = MessageOriginHiddenUser(
+            type="hidden_user",
+            date=forward_date,
+            sender_user_name=sender_user_name,
+        )
+
+        return Message(
+            message_id=message_id,
+            date=date,
+            chat=chat,
+            from_user=from_user,
+            text=text,
+            forward_origin=forward_origin,
+        )
+
+    @classmethod
+    def create_forwarded_from_chat(
+        cls,
+        text: str,
+        from_user: User,
+        sender_chat: Chat,
+        chat: Optional[Chat] = None,
+        message_id: Optional[int] = None,
+        date: Optional[datetime] = None,
+        forward_date: Optional[datetime] = None,
+        author_signature: Optional[str] = None,
+    ) -> Message:
+        """
+        Create a mock Message that was forwarded from a chat (e.g., group or anonymous admin).
+
+        Args:
+            text: Message text content
+            from_user: User who forwarded the message
+            sender_chat: Chat from which the message was originally sent
+            chat: Chat where message was sent (auto-created from user if not provided)
+            message_id: Message ID (auto-generated if not provided)
+            date: Message date (defaults to now)
+            forward_date: Date when original message was sent (defaults to now)
+            author_signature: Optional signature of the post author
+
+        Returns:
+            Mock Message object with forward_origin (chat)
+        """
+        if message_id is None:
+            message_id = cls._message_id_counter
+            cls._message_id_counter += 1
+
+        if chat is None:
+            chat = ChatFactory.create_private(
+                chat_id=from_user.id,
+                first_name=from_user.first_name,
+                last_name=from_user.last_name,
+                username=from_user.username,
+            )
+
+        if date is None:
+            date = datetime.now()
+
+        if forward_date is None:
+            forward_date = datetime.now()
+
+        forward_origin = MessageOriginChat(
+            type="chat",
+            date=forward_date,
+            sender_chat=sender_chat,
+            author_signature=author_signature,
+        )
+
+        return Message(
+            message_id=message_id,
+            date=date,
+            chat=chat,
+            from_user=from_user,
+            text=text,
+            forward_origin=forward_origin,
+        )
+
+    @classmethod
+    def create_forwarded_from_channel(
+        cls,
+        text: str,
+        from_user: User,
+        channel_chat: Chat,
+        channel_message_id: int,
+        chat: Optional[Chat] = None,
+        message_id: Optional[int] = None,
+        date: Optional[datetime] = None,
+        forward_date: Optional[datetime] = None,
+        author_signature: Optional[str] = None,
+    ) -> Message:
+        """
+        Create a mock Message that was forwarded from a channel.
+
+        Args:
+            text: Message text content
+            from_user: User who forwarded the message
+            channel_chat: Channel from which the message was forwarded
+            channel_message_id: Message ID in the original channel
+            chat: Chat where message was sent (auto-created from user if not provided)
+            message_id: Message ID (auto-generated if not provided)
+            date: Message date (defaults to now)
+            forward_date: Date when original message was sent (defaults to now)
+            author_signature: Optional signature of the post author
+
+        Returns:
+            Mock Message object with forward_origin (channel)
+        """
+        if message_id is None:
+            message_id = cls._message_id_counter
+            cls._message_id_counter += 1
+
+        if chat is None:
+            chat = ChatFactory.create_private(
+                chat_id=from_user.id,
+                first_name=from_user.first_name,
+                last_name=from_user.last_name,
+                username=from_user.username,
+            )
+
+        if date is None:
+            date = datetime.now()
+
+        if forward_date is None:
+            forward_date = datetime.now()
+
+        forward_origin = MessageOriginChannel(
+            type="channel",
+            date=forward_date,
+            chat=channel_chat,
+            message_id=channel_message_id,
+            author_signature=author_signature,
+        )
+
+        return Message(
+            message_id=message_id,
+            date=date,
+            chat=chat,
+            from_user=from_user,
+            text=text,
+            forward_origin=forward_origin,
+        )
+
+    @classmethod
     def reset_counter(cls) -> None:
         """Reset the message ID counter."""
         cls._message_id_counter = 1
@@ -430,6 +679,127 @@ class UpdateFactory:
             value=value,
             emoji=emoji,
             chat=chat,
+        )
+        return cls.create_message_update(message)
+
+    @classmethod
+    def from_forwarded_user(
+        cls,
+        text: str,
+        from_user: User,
+        forward_from: User,
+        chat: Optional[Chat] = None,
+    ) -> Update:
+        """
+        Create an Update from a message forwarded from a user.
+
+        Args:
+            text: Message text content
+            from_user: User who forwarded the message
+            forward_from: Original sender of the message
+            chat: Chat where message was sent
+
+        Returns:
+            Update with forwarded message
+        """
+        message = MessageFactory.create_forwarded_from_user(
+            text=text,
+            from_user=from_user,
+            forward_from=forward_from,
+            chat=chat,
+        )
+        return cls.create_message_update(message)
+
+    @classmethod
+    def from_forwarded_hidden_user(
+        cls,
+        text: str,
+        from_user: User,
+        sender_user_name: str,
+        chat: Optional[Chat] = None,
+    ) -> Update:
+        """
+        Create an Update from a message forwarded from a hidden user.
+
+        Args:
+            text: Message text content
+            from_user: User who forwarded the message
+            sender_user_name: Name of the hidden sender
+            chat: Chat where message was sent
+
+        Returns:
+            Update with forwarded message from hidden user
+        """
+        message = MessageFactory.create_forwarded_from_hidden_user(
+            text=text,
+            from_user=from_user,
+            sender_user_name=sender_user_name,
+            chat=chat,
+        )
+        return cls.create_message_update(message)
+
+    @classmethod
+    def from_forwarded_chat(
+        cls,
+        text: str,
+        from_user: User,
+        sender_chat: Chat,
+        chat: Optional[Chat] = None,
+        author_signature: Optional[str] = None,
+    ) -> Update:
+        """
+        Create an Update from a message forwarded from a chat.
+
+        Args:
+            text: Message text content
+            from_user: User who forwarded the message
+            sender_chat: Chat from which the message was originally sent
+            chat: Chat where message was sent
+            author_signature: Optional signature of the post author
+
+        Returns:
+            Update with forwarded message from chat
+        """
+        message = MessageFactory.create_forwarded_from_chat(
+            text=text,
+            from_user=from_user,
+            sender_chat=sender_chat,
+            chat=chat,
+            author_signature=author_signature,
+        )
+        return cls.create_message_update(message)
+
+    @classmethod
+    def from_forwarded_channel(
+        cls,
+        text: str,
+        from_user: User,
+        channel_chat: Chat,
+        channel_message_id: int,
+        chat: Optional[Chat] = None,
+        author_signature: Optional[str] = None,
+    ) -> Update:
+        """
+        Create an Update from a message forwarded from a channel.
+
+        Args:
+            text: Message text content
+            from_user: User who forwarded the message
+            channel_chat: Channel from which the message was forwarded
+            channel_message_id: Message ID in the original channel
+            chat: Chat where message was sent
+            author_signature: Optional signature of the post author
+
+        Returns:
+            Update with forwarded message from channel
+        """
+        message = MessageFactory.create_forwarded_from_channel(
+            text=text,
+            from_user=from_user,
+            channel_chat=channel_chat,
+            channel_message_id=channel_message_id,
+            chat=chat,
+            author_signature=author_signature,
         )
         return cls.create_message_update(message)
 

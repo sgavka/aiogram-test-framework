@@ -132,6 +132,43 @@ class TestRequestCapture:
         edits_200 = capture.get_edited_messages(chat_id=200)
         assert len(edits_200) == 1
 
+    def test_get_edited_reply_markups(self, capture):
+        """Test getting edited reply markups."""
+        edit = CapturedRequest(
+            request_type=RequestType.EDIT_MESSAGE_REPLY_MARKUP,
+            params={"chat_id": 100, "message_id": 1, "reply_markup": {"inline_keyboard": []}},
+        )
+        capture.add(edit)
+
+        edits = capture.get_edited_reply_markups()
+        assert len(edits) == 1
+        assert edits[0].request_type == RequestType.EDIT_MESSAGE_REPLY_MARKUP
+
+    def test_get_edited_reply_markups_with_chat_filter(self, capture):
+        """Test getting edited reply markups with chat filter."""
+        edit1 = CapturedRequest(
+            request_type=RequestType.EDIT_MESSAGE_REPLY_MARKUP,
+            params={"chat_id": 100, "message_id": 1},
+        )
+        edit2 = CapturedRequest(
+            request_type=RequestType.EDIT_MESSAGE_REPLY_MARKUP,
+            params={"chat_id": 200, "message_id": 2},
+        )
+        edit3 = CapturedRequest(
+            request_type=RequestType.EDIT_MESSAGE_REPLY_MARKUP,
+            params={"chat_id": 100, "message_id": 3},
+        )
+        capture.add(edit1)
+        capture.add(edit2)
+        capture.add(edit3)
+
+        edits_100 = capture.get_edited_reply_markups(chat_id=100)
+        assert len(edits_100) == 2
+        assert all(e.chat_id == 100 for e in edits_100)
+
+        edits_200 = capture.get_edited_reply_markups(chat_id=200)
+        assert len(edits_200) == 1
+
     def test_get_deleted_messages(self, capture):
         """Test getting deleted messages."""
         delete = CapturedRequest(
