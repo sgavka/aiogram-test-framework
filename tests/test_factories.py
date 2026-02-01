@@ -405,6 +405,127 @@ class TestMessageFactory:
         assert message.forward_origin.message_id == 42
         assert message.forward_origin.author_signature == "Editor"
 
+    def test_create_dice_with_all_explicit_params(self):
+        """Test creating a dice message with all explicit parameters."""
+        user = UserFactory.create()
+        chat = ChatFactory.create_group(chat_id=-100555, title="Dice Group")
+        custom_date = datetime(2024, 6, 15, 10, 30, 0)
+        message = MessageFactory.create_dice(
+            from_user=user,
+            value=4,
+            emoji="🎯",
+            chat=chat,
+            message_id=777,
+            date=custom_date,
+        )
+
+        assert message.message_id == 777
+        assert message.chat == chat
+        assert message.date == custom_date
+        assert message.dice.value == 4
+        assert message.dice.emoji == "🎯"
+
+    def test_create_forwarded_from_user_with_all_explicit_params(self):
+        """Test creating a forwarded user message with all explicit parameters."""
+        user = UserFactory.create()
+        forward_from = UserFactory.create(first_name="Forwarder")
+        chat = ChatFactory.create_group(chat_id=-100444, title="Forward Group")
+        custom_date = datetime(2024, 5, 20, 14, 0, 0)
+        forward_date = datetime(2024, 5, 19, 12, 0, 0)
+        message = MessageFactory.create_forwarded_from_user(
+            text="Explicit params forward",
+            from_user=user,
+            forward_from=forward_from,
+            chat=chat,
+            message_id=333,
+            date=custom_date,
+            forward_date=forward_date,
+        )
+
+        assert message.message_id == 333
+        assert message.chat == chat
+        assert message.date == custom_date
+        assert message.forward_origin is not None
+        assert isinstance(message.forward_origin, MessageOriginUser)
+        assert message.forward_origin.date == forward_date
+
+    def test_create_forwarded_from_hidden_user_with_all_explicit_params(self):
+        """Test creating a forwarded hidden user message with all explicit parameters."""
+        user = UserFactory.create()
+        chat = ChatFactory.create_group(chat_id=-100333, title="Hidden Group")
+        custom_date = datetime(2024, 4, 10, 8, 0, 0)
+        forward_date = datetime(2024, 4, 9, 6, 0, 0)
+        message = MessageFactory.create_forwarded_from_hidden_user(
+            text="Explicit hidden forward",
+            from_user=user,
+            sender_user_name="AnonymousExplicit",
+            chat=chat,
+            message_id=222,
+            date=custom_date,
+            forward_date=forward_date,
+        )
+
+        assert message.message_id == 222
+        assert message.chat == chat
+        assert message.date == custom_date
+        assert message.forward_origin is not None
+        assert isinstance(message.forward_origin, MessageOriginHiddenUser)
+        assert message.forward_origin.date == forward_date
+        assert message.forward_origin.sender_user_name == "AnonymousExplicit"
+
+    def test_create_forwarded_from_chat_with_all_explicit_params(self):
+        """Test creating a forwarded chat message with all explicit parameters."""
+        user = UserFactory.create()
+        sender_chat = ChatFactory.create_group(chat_id=-100222, title="Source Chat")
+        dest_chat = ChatFactory.create_group(chat_id=-100111, title="Dest Chat")
+        custom_date = datetime(2024, 3, 5, 16, 0, 0)
+        forward_date = datetime(2024, 3, 4, 14, 0, 0)
+        message = MessageFactory.create_forwarded_from_chat(
+            text="Explicit chat forward",
+            from_user=user,
+            sender_chat=sender_chat,
+            chat=dest_chat,
+            message_id=111,
+            date=custom_date,
+            forward_date=forward_date,
+            author_signature="ChatAdmin",
+        )
+
+        assert message.message_id == 111
+        assert message.chat == dest_chat
+        assert message.date == custom_date
+        assert message.forward_origin is not None
+        assert isinstance(message.forward_origin, MessageOriginChat)
+        assert message.forward_origin.date == forward_date
+        assert message.forward_origin.sender_chat == sender_chat
+
+    def test_create_forwarded_from_channel_with_all_explicit_params(self):
+        """Test creating a forwarded channel message with all explicit parameters."""
+        user = UserFactory.create()
+        channel_chat = ChatFactory.create_group(chat_id=-100999, title="Channel Source")
+        dest_chat = ChatFactory.create_group(chat_id=-100888, title="Dest Chat")
+        custom_date = datetime(2024, 2, 1, 12, 0, 0)
+        forward_date = datetime(2024, 1, 31, 10, 0, 0)
+        message = MessageFactory.create_forwarded_from_channel(
+            text="Explicit channel forward",
+            from_user=user,
+            channel_chat=channel_chat,
+            channel_message_id=999,
+            chat=dest_chat,
+            message_id=555,
+            date=custom_date,
+            forward_date=forward_date,
+            author_signature="ChannelEditor",
+        )
+
+        assert message.message_id == 555
+        assert message.chat == dest_chat
+        assert message.date == custom_date
+        assert message.forward_origin is not None
+        assert isinstance(message.forward_origin, MessageOriginChannel)
+        assert message.forward_origin.date == forward_date
+        assert message.forward_origin.message_id == 999
+
 
 class TestCallbackQueryFactory:
     """Tests for CallbackQueryFactory."""

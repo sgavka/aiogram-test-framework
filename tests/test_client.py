@@ -400,3 +400,191 @@ class TestTestClientContextManager:
             pass
 
         assert len(shutdown_called) == 1
+
+
+class TestTestClientForwardedMessages:
+    """Tests for TestClient forwarded message functionality."""
+
+    async def test_send_forwarded_from_user(self):
+        """Test sending a forwarded message from a user."""
+        forward_received = []
+
+        def setup_forward_handler(bot: Bot, dispatcher: Dispatcher) -> None:
+            router = Router()
+
+            @router.message(lambda m: m.forward_origin is not None)
+            async def forward_handler(message: Message) -> None:
+                from aiogram.types import MessageOriginUser
+                if isinstance(message.forward_origin, MessageOriginUser):
+                    forward_received.append(message.forward_origin.sender_user)
+                    await message.answer(
+                        f"Forwarded from: {message.forward_origin.sender_user.first_name}"
+                    )
+
+            dispatcher.include_router(router)
+
+        client = await TestClient.create(
+            bot_token="123456:ABC",
+            bot_id=123456,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+            setup_dispatcher_func=setup_forward_handler,
+        )
+
+        from_user = UserFactory.create(first_name="Forwarder")
+        forward_from = UserFactory.create(first_name="OriginalSender")
+
+        responses = await client.send_forwarded_from_user(
+            text="Original message",
+            from_user=from_user,
+            forward_from=forward_from,
+        )
+
+        assert len(responses) == 1
+        assert "OriginalSender" in responses[0].text
+        assert len(forward_received) == 1
+        assert forward_received[0].first_name == "OriginalSender"
+
+        await client.close()
+
+    async def test_send_forwarded_from_hidden_user(self):
+        """Test sending a forwarded message from a hidden user."""
+        forward_received = []
+
+        def setup_forward_handler(bot: Bot, dispatcher: Dispatcher) -> None:
+            router = Router()
+
+            @router.message(lambda m: m.forward_origin is not None)
+            async def forward_handler(message: Message) -> None:
+                from aiogram.types import MessageOriginHiddenUser
+                if isinstance(message.forward_origin, MessageOriginHiddenUser):
+                    forward_received.append(message.forward_origin.sender_user_name)
+                    await message.answer(
+                        f"Forwarded from hidden: {message.forward_origin.sender_user_name}"
+                    )
+
+            dispatcher.include_router(router)
+
+        client = await TestClient.create(
+            bot_token="123456:ABC",
+            bot_id=123456,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+            setup_dispatcher_func=setup_forward_handler,
+        )
+
+        from_user = UserFactory.create(first_name="Forwarder")
+
+        responses = await client.send_forwarded_from_hidden_user(
+            text="Secret message",
+            from_user=from_user,
+            sender_user_name="Anonymous User",
+        )
+
+        assert len(responses) == 1
+        assert "Anonymous User" in responses[0].text
+        assert len(forward_received) == 1
+        assert forward_received[0] == "Anonymous User"
+
+        await client.close()
+
+    async def test_send_forwarded_from_chat(self):
+        """Test sending a forwarded message from a chat."""
+        forward_received = []
+
+        def setup_forward_handler(bot: Bot, dispatcher: Dispatcher) -> None:
+            router = Router()
+
+            @router.message(lambda m: m.forward_origin is not None)
+            async def forward_handler(message: Message) -> None:
+                from aiogram.types import MessageOriginChat
+                if isinstance(message.forward_origin, MessageOriginChat):
+                    forward_received.append(message.forward_origin.sender_chat)
+                    signature = message.forward_origin.author_signature or "no signature"
+                    await message.answer(
+                        f"Forwarded from chat: {message.forward_origin.sender_chat.title}, "
+                        f"signature: {signature}"
+                    )
+
+            dispatcher.include_router(router)
+
+        client = await TestClient.create(
+            bot_token="123456:ABC",
+            bot_id=123456,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+            setup_dispatcher_func=setup_forward_handler,
+        )
+
+        from_user = UserFactory.create(first_name="Forwarder")
+        sender_chat = ChatFactory.create_group(chat_id=-1001234567890, title="Test Group")
+
+        responses = await client.send_forwarded_from_chat(
+            text="Group message",
+            from_user=from_user,
+            sender_chat=sender_chat,
+            author_signature="Admin",
+        )
+
+        assert len(responses) == 1
+        assert "Test Group" in responses[0].text
+        assert "Admin" in responses[0].text
+        assert len(forward_received) == 1
+        assert forward_received[0].title == "Test Group"
+
+        await client.close()
+
+    async def test_send_forwarded_from_channel(self):
+        """Test sending a forwarded message from a channel."""
+        forward_received = []
+
+        def setup_forward_handler(bot: Bot, dispatcher: Dispatcher) -> None:
+            router = Router()
+
+            @router.message(lambda m: m.forward_origin is not None)
+            async def forward_handler(message: Message) -> None:
+                from aiogram.types import MessageOriginChannel
+                if isinstance(message.forward_origin, MessageOriginChannel):
+                    forward_received.append({
+                        "chat": message.forward_origin.chat,
+                        "message_id": message.forward_origin.message_id,
+                        "signature": message.forward_origin.author_signature,
+                    })
+                    signature = message.forward_origin.author_signature or "no signature"
+                    await message.answer(
+                        f"Forwarded from channel: {message.forward_origin.chat.title}, "
+                        f"msg_id: {message.forward_origin.message_id}, "
+                        f"signature: {signature}"
+                    )
+
+            dispatcher.include_router(router)
+
+        client = await TestClient.create(
+            bot_token="123456:ABC",
+            bot_id=123456,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+            setup_dispatcher_func=setup_forward_handler,
+        )
+
+        from_user = UserFactory.create(first_name="Forwarder")
+        channel_chat = ChatFactory.create_group(chat_id=-1001234567890, title="Test Channel")
+
+        responses = await client.send_forwarded_from_channel(
+            text="Channel post",
+            from_user=from_user,
+            channel_chat=channel_chat,
+            channel_message_id=42,
+            author_signature="Channel Author",
+        )
+
+        assert len(responses) == 1
+        assert "Test Channel" in responses[0].text
+        assert "42" in responses[0].text
+        assert "Channel Author" in responses[0].text
+        assert len(forward_received) == 1
+        assert forward_received[0]["chat"].title == "Test Channel"
+        assert forward_received[0]["message_id"] == 42
+        assert forward_received[0]["signature"] == "Channel Author"
+
+        await client.close()

@@ -205,6 +205,54 @@ class TestMockSession:
         assert response.dice.emoji == "🎳"
         assert response.dice.value == 4
 
+    async def test_make_request_send_dice_basketball_random(self, session, capture, bot_user):
+        """Test that sendDice with basketball emoji returns value 1-5."""
+        bot = MockBot(
+            capture=capture,
+            token="123:ABC",
+            bot_id=123456,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+        )
+
+        method = SendDice(chat_id=100, emoji="🏀")
+        response = await session.make_request(bot, method)
+
+        assert response.dice.emoji == "🏀"
+        assert 1 <= response.dice.value <= 5
+
+    async def test_make_request_send_dice_football_random(self, session, capture, bot_user):
+        """Test that sendDice with football emoji returns value 1-5."""
+        bot = MockBot(
+            capture=capture,
+            token="123:ABC",
+            bot_id=123456,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+        )
+
+        method = SendDice(chat_id=100, emoji="⚽")
+        response = await session.make_request(bot, method)
+
+        assert response.dice.emoji == "⚽"
+        assert 1 <= response.dice.value <= 5
+
+    async def test_make_request_send_dice_slot_machine_random(self, session, capture, bot_user):
+        """Test that sendDice with slot machine emoji returns value 1-64."""
+        bot = MockBot(
+            capture=capture,
+            token="123:ABC",
+            bot_id=123456,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+        )
+
+        method = SendDice(chat_id=100, emoji="🎰")
+        response = await session.make_request(bot, method)
+
+        assert response.dice.emoji == "🎰"
+        assert 1 <= response.dice.value <= 64
+
     async def test_make_request_get_chat(self, session, capture, bot_user):
         """Test that make_request handles getChat."""
         bot = MockBot(

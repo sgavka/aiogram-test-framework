@@ -190,3 +190,135 @@ class TestTestUser:
 
         assert len(responses) == 1
         assert "You rolled: 3" in responses[0].text
+
+
+class TestTestUserForwardedMessages:
+    """Tests for TestUser forwarded message methods."""
+
+    @pytest.fixture
+    async def forward_client(self) -> TestClient:
+        """Provide a TestClient with forward handlers."""
+
+        def setup_forward_handlers(bot, dispatcher):
+            from aiogram.types import (
+                MessageOriginUser,
+                MessageOriginHiddenUser,
+                MessageOriginChat,
+                MessageOriginChannel,
+            )
+            router = Router()
+
+            @router.message(lambda m: m.forward_origin is not None)
+            async def forward_handler(message: Message) -> None:
+                origin = message.forward_origin
+                if isinstance(origin, MessageOriginUser):
+                    await message.answer(f"From user: {origin.sender_user.first_name}")
+                elif isinstance(origin, MessageOriginHiddenUser):
+                    await message.answer(f"From hidden: {origin.sender_user_name}")
+                elif isinstance(origin, MessageOriginChat):
+                    sig = origin.author_signature or "none"
+                    await message.answer(f"From chat: {origin.sender_chat.title}, sig: {sig}")
+                elif isinstance(origin, MessageOriginChannel):
+                    sig = origin.author_signature or "none"
+                    await message.answer(
+                        f"From channel: {origin.chat.title}, id: {origin.message_id}, sig: {sig}"
+                    )
+
+            dispatcher.include_router(router)
+
+        client = await TestClient.create(
+            bot_token="123456:ABC",
+            bot_id=123456,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+            setup_dispatcher_func=setup_forward_handlers,
+        )
+        yield client
+        await client.close()
+
+    async def test_send_forwarded_from_user(self, forward_client):
+        """Test sending a forwarded message from another user."""
+        user = forward_client.create_user()
+        forward_from = UserFactory.create(first_name="OriginalUser")
+
+        responses = await user.send_forwarded_from_user(
+            text="Original message",
+            forward_from=forward_from,
+        )
+
+        assert len(responses) == 1
+        assert "From user: OriginalUser" in responses[0].text
+
+    async def test_send_forwarded_from_hidden_user(self, forward_client):
+        """Test sending a forwarded message from a hidden user."""
+        user = forward_client.create_user()
+
+        responses = await user.send_forwarded_from_hidden_user(
+            text="Hidden message",
+            sender_user_name="SecretSender",
+        )
+
+        assert len(responses) == 1
+        assert "From hidden: SecretSender" in responses[0].text
+
+    async def test_send_forwarded_from_chat(self, forward_client):
+        """Test sending a forwarded message from a chat."""
+        user = forward_client.create_user()
+        sender_chat = ChatFactory.create_group(chat_id=-100999, title="SourceGroup")
+
+        responses = await user.send_forwarded_from_chat(
+            text="Group message",
+            sender_chat=sender_chat,
+            author_signature="GroupAdmin",
+        )
+
+        assert len(responses) == 1
+        assert "From chat: SourceGroup" in responses[0].text
+        assert "sig: GroupAdmin" in responses[0].text
+
+    async def test_send_forwarded_from_chat_no_signature(self, forward_client):
+        """Test sending a forwarded message from a chat without signature."""
+        user = forward_client.create_user()
+        sender_chat = ChatFactory.create_group(chat_id=-100888, title="NoSigGroup")
+
+        responses = await user.send_forwarded_from_chat(
+            text="Group message no sig",
+            sender_chat=sender_chat,
+        )
+
+        assert len(responses) == 1
+        assert "From chat: NoSigGroup" in responses[0].text
+        assert "sig: none" in responses[0].text
+
+    async def test_send_forwarded_from_channel(self, forward_client):
+        """Test sending a forwarded message from a channel."""
+        user = forward_client.create_user()
+        channel_chat = ChatFactory.create_group(chat_id=-100777, title="NewsChannel")
+
+        responses = await user.send_forwarded_from_channel(
+            text="Channel post",
+            channel_chat=channel_chat,
+            channel_message_id=123,
+            author_signature="Editor",
+        )
+
+        assert len(responses) == 1
+        assert "From channel: NewsChannel" in responses[0].text
+        assert "id: 123" in responses[0].text
+        assert "sig: Editor" in responses[0].text
+
+    async def test_send_forwarded_from_channel_no_signature(self, forward_client):
+        """Test sending a forwarded message from a channel without signature."""
+        user = forward_client.create_user()
+        channel_chat = ChatFactory.create_group(chat_id=-100666, title="PlainChannel")
+
+        responses = await user.send_forwarded_from_channel(
+            text="Channel post no sig",
+            channel_chat=channel_chat,
+            channel_message_id=456,
+        )
+
+        assert len(responses) == 1
+        assert "From channel: PlainChannel" in responses[0].text
+        assert "id: 456" in responses[0].text
+        assert "sig: none" in responses[0].text
