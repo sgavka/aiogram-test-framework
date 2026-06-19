@@ -125,13 +125,13 @@ class AsyncBotTestMixin:
     """
 
     async def setup_client(
-            self,
-            bot_token: str = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
-            bot_id: int = 123456,
-            bot_username: str = "test_bot",
-            bot_first_name: str = "Test Bot",
-            dispatcher: Optional[Dispatcher] = None,
-            setup_dispatcher_func: Optional[Callable] = None,
+        self,
+        bot_token: str = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+        bot_id: int = 123456,
+        bot_username: str = "test_bot",
+        bot_first_name: str = "Test Bot",
+        dispatcher: Optional[Dispatcher] = None,
+        setup_dispatcher_func: Optional[Callable[[Bot, Dispatcher], None]] = None,
     ) -> TestClient:
         """
         Set up the test client with the dispatcher.
