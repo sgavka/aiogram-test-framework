@@ -9,7 +9,11 @@ export IS_SANDBOX=1
 MODEL=""
 CONTINUE_MODE=false
 ITERATION=0
-PROMPT_FILE="docs/PLANE.md"
+# The dir this script (and PLANE.md, plane.sh, github.sh, ...) lives in —
+# derived from the script's own location so the same file works from docs/,
+# ralph/, or any other folder (see RALPH_SCRIPT in ralph.md / render.sh).
+RALPH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROMPT_FILE="$RALPH_DIR/PLANE.md"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -142,7 +146,7 @@ check_claude_limits() {
 # a genuine test failure demotes the task. PENDING/NONE leaves it in Review.
 sweep_failed_tests() {
     local review_json count
-    review_json=$(docs/plane.sh list-review 2>/dev/null) || return 0
+    review_json=$("$RALPH_DIR/plane.sh" list-review 2>/dev/null) || return 0
     [ -z "$review_json" ] && return 0
     count=$(echo "$review_json" | jq 'length' 2>/dev/null || echo 0)
     [ "${count:-0}" -eq 0 ] && return 0
@@ -154,23 +158,23 @@ sweep_failed_tests() {
         branch=$(echo "$review_json" | jq -r ".[$i].description_html // \"\"" \
             | grep -oP '(?<=Branch: <code>)[^<]+' | tail -1 || echo "")
         [ -z "$branch" ] && continue
-        status=$(docs/github.sh tests-status "$branch" 2>/dev/null || echo "NONE")
+        status=$("$RALPH_DIR/github.sh" tests-status "$branch" 2>/dev/null || echo "NONE")
         if [ "$status" = "FAILURE" ]; then
             printf "\033[90m[%s]\033[0m \033[31mTests failed on #%s (%s) — moving → Todo\033[0m\n" \
                 "$(date +%H:%M:%S)" "$seq" "$branch"
-            pr_url=$(docs/github.sh pr-url "$branch" 2>/dev/null || echo "")
+            pr_url=$("$RALPH_DIR/github.sh" pr-url "$branch" 2>/dev/null || echo "")
             cmt="<p>CI <strong>tests failed</strong> on branch <code>${branch}</code> — moved back to Todo to fix."
             if [ -n "$pr_url" ]; then
                 cmt="${cmt} See <a href=\"${pr_url}/checks\">PR checks</a>."
             fi
             cmt="${cmt}</p>"
-            docs/plane.sh add-comment "$id" "$cmt" 2>/dev/null || true
-            docs/plane.sh set-todo "$id" 2>/dev/null || true
+            "$RALPH_DIR/plane.sh" add-comment "$id" "$cmt" 2>/dev/null || true
+            "$RALPH_DIR/plane.sh" set-todo "$id" 2>/dev/null || true
         fi
     done
 }
 
-LOGS_DIR="docs/ralph-logs/$(date +%Y%m%d-%H%M%S)"
+LOGS_DIR="$RALPH_DIR/ralph-logs/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$LOGS_DIR"
 
 echo -e "\033[1;35m════════════════════════════════════════\033[0m"
@@ -202,7 +206,7 @@ while true; do
 
         # Check for an interrupted in-progress task first (resume after restart)
         IP_RESULT=""
-        if IP_RESULT=$(docs/plane.sh task-in-progress 2>/dev/null); then
+        if IP_RESULT=$("$RALPH_DIR/plane.sh" task-in-progress 2>/dev/null); then
             IP_DONE=$(echo "$IP_RESULT" | jq -r '.done // false' 2>/dev/null || echo "false")
             if [ "$IP_DONE" != "true" ]; then
                 ITER_RESUME=true
@@ -213,7 +217,7 @@ while true; do
 
         if [ "$ITER_RESUME" = "false" ]; then
             NEXT_TASK_CHECK=""
-            if NEXT_TASK_CHECK=$(docs/plane.sh next-task 2>/dev/null); then
+            if NEXT_TASK_CHECK=$("$RALPH_DIR/plane.sh" next-task 2>/dev/null); then
                 TASK_IS_DONE=$(echo "$NEXT_TASK_CHECK" | jq -r '.done // false' 2>/dev/null || echo "false")
             else
                 TASK_IS_DONE="false"
@@ -270,7 +274,7 @@ while true; do
     # Move fresh tasks to In Progress (start); resumed tasks are already In Progress.
     if [ "$ITER_RESUME" = "false" ] && [ -n "$TASK_ID" ]; then
         printf "\033[90m[%s] Starting task %s (→ In Progress)...\033[0m" "$(date +%H:%M:%S)" "$TASK_ID"
-        docs/plane.sh set-in-progress "$TASK_ID" >/dev/null 2>&1 && printf " \033[32mOK\033[0m\n" || printf " \033[33mfailed\033[0m\n"
+        "$RALPH_DIR/plane.sh" set-in-progress "$TASK_ID" >/dev/null 2>&1 && printf " \033[32mOK\033[0m\n" || printf " \033[33mfailed\033[0m\n"
     else
         printf "\033[90m[%s] Resuming task %s (already In Progress)\033[0m\n" "$(date +%H:%M:%S)" "$TASK_ID"
     fi
@@ -452,8 +456,8 @@ while true; do
         if [ -n "$GIST_URL" ]; then
             ITER_COMMENT="${ITER_COMMENT}<p>Ralph logs (secret gist): <a href=\"${GIST_URL}\">${GIST_URL}</a></p>"
         fi
-        docs/plane.sh add-comment "$TASK_ID" "$ITER_COMMENT" 2>/dev/null || true
-        docs/plane.sh set-review "$TASK_ID" 2>/dev/null || true
+        "$RALPH_DIR/plane.sh" add-comment "$TASK_ID" "$ITER_COMMENT" 2>/dev/null || true
+        "$RALPH_DIR/plane.sh" set-review "$TASK_ID" 2>/dev/null || true
         printf " \033[32mOK\033[0m\n"
     fi
 

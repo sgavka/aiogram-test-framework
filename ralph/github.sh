@@ -4,14 +4,14 @@
 # of inline `gh api graphql` blocks.
 #
 # Usage (run from repo root):
-#   docs/github.sh pr-number <branch>            — PR number for a branch ("" if none)
-#   docs/github.sh pr-url <branch>               — PR html URL for a branch ("" if none)
-#   docs/github.sh pr-state <branch>             — PR state: OPEN | MERGED | CLOSED | NONE
-#   docs/github.sh tests-status <branch>         — test check only: SUCCESS | FAILURE | PENDING | NONE
-#   docs/github.sh unresolved-threads <branch>   — unresolved review threads as JSON
+#   github.sh pr-number <branch>            — PR number for a branch ("" if none)
+#   github.sh pr-url <branch>               — PR html URL for a branch ("" if none)
+#   github.sh pr-state <branch>             — PR state: OPEN | MERGED | CLOSED | NONE
+#   github.sh tests-status <branch>         — test check only: SUCCESS | FAILURE | PENDING | NONE
+#   github.sh unresolved-threads <branch>   — unresolved review threads as JSON
 #                                                  [{id, path, line, startLine, side, outdated, author, url, body, diffHunk}]
-#   docs/github.sh resolve-thread <thread_id>    — mark a review thread resolved
-#   docs/github.sh create-pr <base> <head> <title> <body>  — create a PR, print its URL
+#   github.sh resolve-thread <thread_id>    — mark a review thread resolved
+#   github.sh create-pr <base> <head> <title> <body>  — create a PR, print its URL
 #
 # Required in .env: GH_OWNER (repo owner/org), GH_REPO (repo name)
 # Optional in .env: PR_CI_CHECK_PATTERNS — comma-separated, case-insensitive

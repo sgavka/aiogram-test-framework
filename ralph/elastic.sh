@@ -3,7 +3,7 @@
 # The filterable field set is project-specific and configured entirely via env
 # (no per-project script edits needed) — see ELASTIC_EXTRA_FIELDS below.
 #
-# Usage: docs/elastic.sh <command> [options]
+# Usage: elastic.sh <command> [options]
 #
 # Env:
 #   ELASTIC_URL           (default: http://localhost:9200)
@@ -196,7 +196,7 @@ for flag, field in extra:
     ;;
 
   *)
-    echo "Usage: docs/elastic.sh <command> [options]"
+    echo "Usage: elastic.sh <command> [options]"
     echo ""
     echo "Commands:"
     echo "  errors  [N] [filters]          last N errors (default: 20)"
@@ -215,10 +215,10 @@ for flag, field in extra:
     echo '  --query '\''level_name.keyword:"ERROR" AND NOT message:"some message"'\'''
     echo ""
     echo "Examples:"
-    echo "  docs/elastic.sh errors 50"
-    echo "  docs/elastic.sh search 'connection refused' 10"
-    echo '  docs/elastic.sh search --query '\''level_name.keyword:"ERROR" AND NOT message:"Jobs found"'\'' 20'
-    echo "  docs/elastic.sh tail 30 --level ERROR"
-    echo "  docs/elastic.sh stats 1h"
+    echo "  elastic.sh errors 50"
+    echo "  elastic.sh search 'connection refused' 10"
+    echo '  elastic.sh search --query '\''level_name.keyword:"ERROR" AND NOT message:"Jobs found"'\'' 20'
+    echo "  elastic.sh tail 30 --level ERROR"
+    echo "  elastic.sh stats 1h"
     ;;
 esac

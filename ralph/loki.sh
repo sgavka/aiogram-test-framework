@@ -3,7 +3,7 @@
 # Loki equivalent of elastic.sh, for projects that ship logs to Loki/Grafana
 # Cloud instead of (or in addition to) Elasticsearch.
 #
-# Usage: docs/loki.sh <command> [options]
+# Usage: loki.sh <command> [options]
 #
 # Env:
 #   LOKI_URL              push endpoint from the project's .env, e.g.
@@ -281,7 +281,7 @@ for v in data.get("data", []):
     ;;
 
   *)
-    echo "Usage: docs/loki.sh <command> [options]"
+    echo "Usage: loki.sh <command> [options]"
     echo ""
     echo "Commands:"
     echo "  errors  [N] [filters]          last N lines matching level ERROR (default: 20, lookback 24h)"
@@ -302,10 +302,10 @@ for v in data.get("data", []):
     echo "  --since 1h|24h|7d (default: 24h)"
     echo ""
     echo "Examples:"
-    echo "  docs/loki.sh errors 50"
-    echo "  docs/loki.sh search 'connection refused' 10"
-    echo "  docs/loki.sh tail 30 --level ERROR --since 6h"
-    echo "  docs/loki.sh stats 1h"
-    echo "  docs/loki.sh labels"
+    echo "  loki.sh errors 50"
+    echo "  loki.sh search 'connection refused' 10"
+    echo "  loki.sh tail 30 --level ERROR --since 6h"
+    echo "  loki.sh stats 1h"
+    echo "  loki.sh labels"
     ;;
 esac

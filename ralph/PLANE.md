@@ -4,7 +4,7 @@ Development loop using Plane.so as the task board. **The task you must work on i
 
 ## Communication rules (read first)
 
-- **All communication goes through task comments — never address the operator in your stdout/response.** Questions, answers, status, and blockers must be posted with `docs/plane.sh add-comment <id> "<html>"`. Your textual response is not seen by anyone.
+- **All communication goes through task comments — never address the operator in your stdout/response.** Questions, answers, status, and blockers must be posted with `ralph/plane.sh add-comment <id> "<html>"`. Your textual response is not seen by anyone.
 - **Everything sent to Plane must be HTML, not Markdown.** Comments and description fragments use `<p>`, `<code>`, `<a href>`, `<ul><li>`, `<strong>`, etc. Never send `**bold**`, `` `code` ``, `[text](url)`, or `- bullet` Markdown — it will not render.
   - ❌ WRONG: `add-comment <id> "[PR #57](https://github.com/x/pull/57)"` → renders as the literal text `[PR #57](...)`.
   - ✅ RIGHT: `add-comment <id> "<p><a href=\"https://github.com/x/pull/57\">PR #57</a></p>"`.
@@ -22,21 +22,21 @@ You never change task state — the loop owns every transition. Your task is **a
 
 ## Plane API Helper
 
-All Plane interactions go through `docs/plane.sh` (run from repo root). **Comment and description bodies must be HTML.**
+All Plane interactions go through `ralph/plane.sh` (run from repo root). **Comment and description bodies must be HTML.**
 
 ```bash
-docs/plane.sh add-comment <id> "<html>"           # Post an HTML comment on the issue
-docs/plane.sh get-comments <id>                    # List all comments [{id,body,created_at}]
-docs/plane.sh get-issue <id>                       # Full issue JSON
-docs/plane.sh update-description <id>              # Replace description_html (reads HTML from stdin)
-docs/plane.sh append-description <id>             # Append HTML to END of description (reads from stdin)
-docs/plane.sh prepend-description <id>            # Prepend HTML to START of description (reads from stdin)
-docs/plane.sh set-branch <id> <branch>            # Append branch tag to description AND post a comment
-docs/plane.sh set-pr <id> <pr_url>                # Append PR link to description AND post a comment
-docs/plane.sh create-task <name> [desc] [priority] [backlog|todo]   # Create new task (default: backlog)
-docs/plane.sh upload-asset <file> <id> [project_id]       # Upload an image/file, attached to the task; prints {asset_id, embed_html}
-docs/plane.sh download-asset <asset_id> <out_path> <id> [project_id] # Download an asset attached to the task, to view it
-docs/plane.sh list-images <id>                    # JSON array of asset ids embedded in the task's description + comments
+ralph/plane.sh add-comment <id> "<html>"           # Post an HTML comment on the issue
+ralph/plane.sh get-comments <id>                    # List all comments [{id,body,created_at}]
+ralph/plane.sh get-issue <id>                       # Full issue JSON
+ralph/plane.sh update-description <id>              # Replace description_html (reads HTML from stdin)
+ralph/plane.sh append-description <id>             # Append HTML to END of description (reads from stdin)
+ralph/plane.sh prepend-description <id>            # Prepend HTML to START of description (reads from stdin)
+ralph/plane.sh set-branch <id> <branch>            # Append branch tag to description AND post a comment
+ralph/plane.sh set-pr <id> <pr_url>                # Append PR link to description AND post a comment
+ralph/plane.sh create-task <name> [desc] [priority] [backlog|todo]   # Create new task (default: backlog)
+ralph/plane.sh upload-asset <file> <id> [project_id]       # Upload an image/file, attached to the task; prints {asset_id, embed_html}
+ralph/plane.sh download-asset <asset_id> <out_path> <id> [project_id] # Download an asset attached to the task, to view it
+ralph/plane.sh list-images <id>                    # JSON array of asset ids embedded in the task's description + comments
 ```
 
 **Images in comments/descriptions.** Plane embeds uploaded images as `<image-component src="<asset_id>" width="35%" height="auto" alignment="left"></image-component>` — `src` is an asset UUID, not a literal URL.
@@ -52,16 +52,16 @@ When creating sub-tasks during implementation, use `backlog` (the default). They
 
 ## GitHub Helper
 
-GitHub operations go through `docs/github.sh` (wraps `gh`):
+GitHub operations go through `ralph/github.sh` (wraps `gh`):
 
 ```bash
-docs/github.sh pr-number <branch>            # PR number for a branch ("" if none)
-docs/github.sh pr-url <branch>               # PR html URL for a branch ("" if none)
-docs/github.sh pr-state <branch>             # OPEN | MERGED | CLOSED | NONE
-docs/github.sh tests-status <branch>         # configured CI checks only: SUCCESS | FAILURE | PENDING | NONE
-docs/github.sh unresolved-threads <branch>   # unresolved review threads as JSON [{id, body}]
-docs/github.sh resolve-thread <thread_id>    # mark a review thread resolved
-docs/github.sh create-pr <base> <head> <title> <body>   # create a PR, prints its URL
+ralph/github.sh pr-number <branch>            # PR number for a branch ("" if none)
+ralph/github.sh pr-url <branch>               # PR html URL for a branch ("" if none)
+ralph/github.sh pr-state <branch>             # OPEN | MERGED | CLOSED | NONE
+ralph/github.sh tests-status <branch>         # configured CI checks only: SUCCESS | FAILURE | PENDING | NONE
+ralph/github.sh unresolved-threads <branch>   # unresolved review threads as JSON [{id, body}]
+ralph/github.sh resolve-thread <thread_id>    # mark a review thread resolved
+ralph/github.sh create-pr <base> <head> <title> <body>   # create a PR, prints its URL
 ```
 
 ## Development Steps
@@ -86,7 +86,7 @@ The task is in the `## Your task` JSON appended to this prompt. It is **already 
 - **Plane task comments** — already in the injected `comments` array.
 - **GitHub PR review threads** — if `description_html` contains a `Branch: <code>…</code>` tag, fetch unresolved threads:
   ```bash
-  docs/github.sh unresolved-threads <branch>   # → [{id, body}]
+  ralph/github.sh unresolved-threads <branch>   # → [{id, body}]
   ```
   Keep each thread `id` — needed to resolve it later.
 
@@ -95,13 +95,13 @@ The task is in the `## Your task` JSON appended to this prompt. It is **already 
 Read the current description and compare against checklist lines (containing `[ ]` or `[x]`). For every comment/thread body **not yet present**, append it as a new `[ ]` item (HTML):
 
 ```bash
-printf '<p>[ ] <new item text></p>' | docs/plane.sh append-description <id>
+printf '<p>[ ] <new item text></p>' | ralph/plane.sh append-description <id>
 ```
 
 If there is no checklist yet, append a heading first:
 
 ```bash
-printf '<hr/><p><strong>Checklist:</strong></p><p>[ ] <item></p>' | docs/plane.sh append-description <id>
+printf '<hr/><p><strong>Checklist:</strong></p><p>[ ] <item></p>' | ralph/plane.sh append-description <id>
 ```
 
 #### 3. After implementing each checklist item
@@ -110,11 +110,11 @@ Mark it done in the description and (for PR threads) resolve the GitHub conversa
 
 ```bash
 # Mark done in description (rewrite the full HTML)
-UPDATED=$(docs/plane.sh get-issue <id> | jq -r '.description_html' | sed 's/\[ \] fix X/[x] fix X/')
-printf '%s' "$UPDATED" | docs/plane.sh update-description <id>
+UPDATED=$(ralph/plane.sh get-issue <id> | jq -r '.description_html' | sed 's/\[ \] fix X/[x] fix X/')
+printf '%s' "$UPDATED" | ralph/plane.sh update-description <id>
 
 # Resolve the GitHub thread (if this item came from a PR review)
-docs/github.sh resolve-thread <thread_id>
+ralph/github.sh resolve-thread <thread_id>
 ```
 
 #### 4. Detect merge instruction
@@ -126,7 +126,7 @@ Scan every comment body (Plane + PR) for `merge with <branch>`, `merge to <branc
 If any comment or the description poses a question you can answer, **answer it in a comment** before or during implementation:
 
 ```bash
-docs/plane.sh add-comment <id> "<p>Answer: …</p>"
+ralph/plane.sh add-comment <id> "<p>Answer: …</p>"
 ```
 
 ### 1. Create a git branch
@@ -141,7 +141,7 @@ Rules for `name_slug`: lowercase the name; spaces → hyphens; remove non-alphan
 git checkout master
 git pull origin master
 git checkout -b <branch>
-docs/plane.sh set-branch <id> <branch>
+ralph/plane.sh set-branch <id> <branch>
 ```
 
 #### Iteration detection
@@ -149,8 +149,8 @@ docs/plane.sh set-branch <id> <branch>
 If the description already contains a `Branch: <code>…</code>` tag (written by `set-branch` in a prior iteration), this task is continuing. Detect the existing PR state:
 
 ```bash
-BRANCH=$(docs/plane.sh get-issue <id> | jq -r '.description_html' | grep -oP '(?<=Branch: <code>)[^<]+' | tail -1)
-PR_STATE=$(docs/github.sh pr-state "$BRANCH")
+BRANCH=$(ralph/plane.sh get-issue <id> | jq -r '.description_html' | grep -oP '(?<=Branch: <code>)[^<]+' | tail -1)
+PR_STATE=$(ralph/github.sh pr-state "$BRANCH")
 ```
 
 - **`OPEN`** — check out the existing branch and continue; **do not create a new branch or call `set-branch`**:
@@ -164,7 +164,7 @@ PR_STATE=$(docs/github.sh pr-state "$BRANCH")
   git checkout master
   git pull origin master
   git checkout -b "$NEW_BRANCH"
-  docs/plane.sh set-branch <id> "$NEW_BRANCH"
+  ralph/plane.sh set-branch <id> "$NEW_BRANCH"
   ```
 
 ### 3. Investigate and implement
@@ -174,13 +174,13 @@ PR_STATE=$(docs/github.sh pr-state "$BRANCH")
 3.2. **If the description is short** (no checklist, no investigation notes, no clear subtasks) — investigate the relevant code first, then write findings back into the description before touching code:
 
 ```bash
-CURRENT_HTML=$(docs/plane.sh get-issue <id> | jq -r '.description_html // ""')
-printf '<hr/><p><strong>Investigation:</strong></p><p>…</p><p><strong>Checklist:</strong></p><p>[ ] subtask 1</p><p>[ ] subtask 2</p>' | docs/plane.sh append-description <id>
+CURRENT_HTML=$(ralph/plane.sh get-issue <id> | jq -r '.description_html // ""')
+printf '<hr/><p><strong>Investigation:</strong></p><p>…</p><p><strong>Checklist:</strong></p><p>[ ] subtask 1</p><p>[ ] subtask 2</p>' | ralph/plane.sh append-description <id>
 ```
 
 If questions surface during investigation, post them as a comment and stop — this "post and stop" pattern (comment, then emit the completion signal, nothing else) recurs at every stopping point below:
 ```bash
-docs/plane.sh add-comment <id> "<p>Question: …</p>"
+ralph/plane.sh add-comment <id> "<p>Question: …</p>"
 ```
 ```
 <promise>TASK_DONE</promise>
@@ -191,7 +191,7 @@ If no questions, continue to implementation using the checklist you just wrote.
 3.2.1. **If the task is purely technical** (names a class/method/file/config to change without business context) and investigation reveals missing context needed to implement correctly (unclear API contract, unknown callers, undescribed integration point), post the specific blockers as a comment and stop the same way as 3.2:
 
 ```bash
-docs/plane.sh add-comment <id> "<p>Technical blockers:</p><ul><li>…</li></ul>"
+ralph/plane.sh add-comment <id> "<p>Technical blockers:</p><ul><li>…</li></ul>"
 ```
 
 3.3. Investigate the relevant code (if not done in 3.2).
@@ -241,8 +241,8 @@ Then continue to step 6.
 ### 6. Create PR and record it on the task
 
 ```bash
-PR_URL=$(docs/github.sh create-pr master <branch> "<task name>" "Plane task: <sequence_id>")
-docs/plane.sh set-pr <id> "$PR_URL"
+PR_URL=$(ralph/github.sh create-pr master <branch> "<task name>" "Plane task: <sequence_id>")
+ralph/plane.sh set-pr <id> "$PR_URL"
 ```
 
 `set-pr` posts the comment too (see the CRITICAL note under *Plane API Helper*) — recording the PR is **done** after this call; do not follow it with another `add-comment` about the PR.
@@ -252,7 +252,7 @@ docs/plane.sh set-pr <id> "$PR_URL"
 Before signalling done, reflect on what knowledge was **missing from `CLAUDE.md` or the skills** that would have made this task easier (an undocumented pattern, a missing helper command, an architectural rule, a `PLANE.md` ambiguity). If anything significant is missing, post a comment with specific suggestions (HTML). If everything was available, skip this.
 
 ```bash
-docs/plane.sh add-comment <id> "<p>CLAUDE.md / skills suggestions:</p><ul><li>…</li></ul>"
+ralph/plane.sh add-comment <id> "<p>CLAUDE.md / skills suggestions:</p><ul><li>…</li></ul>"
 ```
 
 ### 8. Cleanup
