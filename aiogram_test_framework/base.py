@@ -9,7 +9,7 @@ Provides a mixin that works with:
 
 from typing import Callable, Optional
 
-from aiogram import Dispatcher
+from aiogram import Bot, Dispatcher
 
 from aiogram_test_framework.client import TestClient
 from aiogram_test_framework.factories import (
