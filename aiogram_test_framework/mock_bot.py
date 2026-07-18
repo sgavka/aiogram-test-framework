@@ -238,6 +238,11 @@ class MockBot(Bot):
         """Get the mock bot user."""
         return self._bot_user
 
+    @property
+    def mock_session(self) -> MockSession:
+        """Get the mock session instance."""
+        return self._mock_session
+
     def reset_capture(self) -> None:
         """Clear all captured requests."""
         self._capture.clear()
