@@ -27,7 +27,7 @@ from aiogram_test_framework.user import TestUser
 from aiogram_test_framework.base import AsyncBotTestMixin
 from aiogram_test_framework.setup import create_test_dispatcher
 
-__version__ = "0.1.0"
+__version__ = "1.0.4"
 
 __all__ = [
     # Types
