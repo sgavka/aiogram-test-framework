@@ -6,6 +6,7 @@
 #   docs/plane.sh set-in-progress <id>                   — move issue to "In Progress" state (automation-internal)
 #   docs/plane.sh set-review <id>                        — move issue to "Review" state (automation-internal)
 #   docs/plane.sh set-todo <id>                          — move issue back to "Todo" state (automation-internal)
+#   docs/plane.sh set-label <id> <label>                  — replace an issue's labels with a single label (name or UUID) — e.g. to fix a task routed to the wrong sibling project
 #   docs/plane.sh list-review                            — Review-state tasks [{id,sequence_id,name,description_html}]
 #   docs/plane.sh add-comment <id> <html>                — post a comment on an issue (body must be HTML)
 #   docs/plane.sh get-comments <id>                      — list all comments on an issue as JSON
@@ -15,24 +16,26 @@
 #   docs/plane.sh set-branch <id> <branch>              — append branch tag to description AND post a comment
 #   docs/plane.sh set-pr <id> <pr_url>                  — append PR link to description AND post a comment
 #   docs/plane.sh task-in-progress                      — in-progress task (filtered by PLANE_LABEL); {"done":true} if none
-#   docs/plane.sh create-task <name> [desc] [priority] [backlog|todo]  — create new issue
-#   docs/plane.sh create-page <name> [desc_html]         — create new project page
-#   docs/plane.sh main-page                              — get the project's main doc page (needs PLANE_MAIN_DOC_PAGE_ID; see how-to-add-plane-pages.md)
+#   docs/plane.sh create-task <name> [desc] [priority] [backlog|todo] [label] [link_from_id]  — create new issue; priority must be one of urgent, high, medium, low, none (default none) — any other value is rejected loudly; with link_from_id, appends a link to the new task onto that task's description
+#   docs/plane.sh task-url <id>                          — print an issue's web-app URL (for linking it from a comment/description)
+#   docs/plane.sh create-page <name> [desc_html|@file]   — create new project page (@file reads desc from a file)
+#   docs/plane.sh main-page [page_name] [env_key]         — get a root doc page by env_key (default PLANE_MAIN_DOC_PAGE_ID), creating it (named page_name) if it does not exist yet; response includes just_created: true/false. Pass a distinct env_key to track more than one root (e.g. separate dev/user doc hierarchies).
 #   docs/plane.sh page-url <id>                          — print the page's web-app URL (for linking it from another page)
-#   docs/plane.sh append-to-page <id>                    — append HTML to the end of a page's description_html (reads from stdin)
-#   docs/plane.sh get-page <id>                          — print full page JSON (includes description_html)
-#   docs/plane.sh edit-page <id> [name] [desc_html]      — patch a page's name and/or description (pass "" to skip one)
+#   docs/plane.sh get-page <id> [out_file]               — print full page JSON; with out_file, write description_html to it instead
+#   docs/plane.sh edit-page <id> [name] [desc_html|@file] — patch a page's name and/or description (pass "" to skip one; @file reads desc from a file)
+#   docs/plane.sh rename-page <id> <name>                 — rename a page without touching its description
 #   docs/plane.sh remove-page <id>                       — delete a page (must be archived first — see archive-page)
 #   docs/plane.sh archive-page <id>                      — archive a page (and descendants); required before remove-page
 #   docs/plane.sh unarchive-page <id>                    — unarchive a page (and descendants)
 #   docs/plane.sh search-pages <query>                   — server-side search for pages by name
-#   docs/plane.sh replace-in-page <id> <search> <replace> — literal (non-regex) search/replace within a page's description_html
 #   docs/plane.sh done-in-period <from> [<to>]          — list tasks in Done state updated within a date range
 #   docs/plane.sh review-done-in-period <from> [<to>]   — grouped text report of Done/Processing/Cancelled tasks updated within a range
 #   docs/plane.sh set-done <id>                          — move issue to Done (operator-triggered only)
 #   docs/plane.sh set-cancelled <id>                     — move issue to Cancelled (operator-triggered only)
 #   docs/plane.sh get-issue <id>                         — print full issue JSON
+#   docs/plane.sh get-task <PROJECT-123>                 — look up an issue by its human-readable ref (e.g. TM-808) and print full issue JSON + comments
 #   docs/plane.sh list-states                            — print all project states
+#   docs/plane.sh list-labels                            — print all project labels [{id,name}] (e.g. to find a sibling project's label for create-task)
 #   docs/plane.sh list-projects                          — print all workspace projects
 #   docs/plane.sh upload-asset <file> <issue_id> [project_id]              — upload an image/file, attached to the issue; print {asset_id, embed_html}
 #   docs/plane.sh download-asset <asset_id> <out_path> <issue_id> [project_id] — download an asset attached to the issue (e.g. an image embedded in a comment/description)
@@ -57,14 +60,21 @@
 #
 # Required in .env: PLANE_HOST, PLANE_TOKEN, PLANE_USERNAME
 # Optional in .env: PLANE_PROJECT_ID       (auto-detected from first project if absent)
-#                   PLANE_MAIN_DOC_PAGE_ID  (id of the project's main Plane doc page, used by main-page;
-#                                            empty until the page has been created once — see how-to-add-plane-pages.md)
+#                   PLANE_MAIN_DOC_PAGE_ID  (id of the project's main Plane doc page, used by main-page as its
+#                                            default env_key; empty until the page has been created once — see
+#                                            how-to-add-plane-pages.md. Projects with more than one doc hierarchy
+#                                            use additional PLANE_*_PAGE_ID keys instead, passed explicitly to
+#                                            main-page — e.g. PLANE_DEV_DOCS_PAGE_ID/PLANE_USER_DOCS_PAGE_ID)
 #                   PLANE_STATE_IN_PROGRESS (default: searches by name "In Progress" in started group)
 #                   PLANE_STATE_REVIEW      (default: searches by name containing "review")
 #                   PLANE_STATE_DONE        (default: searches completed group for name "done")
 #                   PLANE_STATE_CANCELLED   (default: first state in cancelled group)
 #                   PLANE_LABEL             (name or UUID; next-task/task-in-progress only returns issues with this label)
-#                   PLANE_RESPECT_BLOCKERS  (1 to skip next-task candidates blocked by an unresolved "Blocked by: #<seq>" reference)
+#                   PLANE_RESPECT_BLOCKERS  (1 to skip next-task candidates blocked by an unresolved "Blocked by: #<seq>" reference;
+#                                            add "(review)" — e.g. "Blocked by: #<seq> (review)" — to resolve as soon as the
+#                                            blocker reaches a Review-named state instead of waiting for Done/Cancelled)
+#                   PLANE_ASSIGNEE_ID       (member UUID; create-task assigns every new task to this member. Absent = no
+#                                            assignee set, same as before this key existed)
 
 set -euo pipefail
 
@@ -99,7 +109,51 @@ BASE="https://$PLANE_HOST/api/v1/workspaces/$PLANE_USERNAME"
 # ---------------------------------------------------------------------------
 
 _curl() {
-    curl -sf -H "X-API-Key: $PLANE_TOKEN" -H "Content-Type: application/json" "$@"
+    curl -sS --fail-with-body -H "X-API-Key: $PLANE_TOKEN" -H "Content-Type: application/json" "$@"
+}
+
+# If $1 starts with "@", read and print the rest as a file path; otherwise
+# print $1 unchanged. Mirrors curl's -d @file convention.
+_resolve_at_file() {
+    local val="$1"
+    if [[ "$val" == @* ]]; then
+        local f="${val#@}"
+        if [ ! -f "$f" ]; then
+            echo "ERROR: file not found: $f" >&2
+            exit 1
+        fi
+        cat "$f"
+    else
+        echo -n "$val"
+    fi
+}
+
+# Build a jq payload that embeds a (possibly large) description_html value
+# without going through argv: Linux caps a single argv/environ string at
+# MAX_ARG_STRLEN (128 KiB), so `jq -n --arg desc "$big_html"` fails with
+# "Argument list too long" once a page description crosses that size — write
+# it to a temp file and read it back with --rawfile instead. Extra jq args
+# (e.g. --arg name "$name") and the filter string are forwarded as-is; the
+# filter refers to the description value as $desc.
+_jq_with_desc() {
+    local desc_html="$1"; shift
+    local tmp
+    tmp=$(mktemp)
+    trap 'rm -f "$tmp"' RETURN
+    printf '%s' "$desc_html" > "$tmp"
+    jq -n --rawfile desc "$tmp" "$@"
+}
+
+# Update or append KEY=VALUE in .env, so a value discovered at runtime
+# (e.g. a newly created page's id) persists for the next loop iteration
+# without a separate manual edit step.
+_persist_env_key() {
+    local key="$1" value="$2"
+    if [ -f .env ] && grep -q "^${key}=" .env; then
+        sed -i "s|^${key}=.*|${key}=${value}|" .env
+    else
+        echo "${key}=${value}" >> .env
+    fi
 }
 
 _project_id() {
@@ -126,11 +180,23 @@ _state_id_by_group_or_name() {
     local states
     states=$(_states "$pid")
     local id
+    # Exact name match wins first — a project can have more than one state in
+    # the same group whose name contains the hint (e.g. "Todo" AND "Todo
+    # (pre-AI)" both contain "todo"), and a plain substring match picks
+    # whichever the API happens to return first, which is not reliably the
+    # plain one. Only fall back to substring matching if no exact match exists.
     id=$(echo "$states" | jq -r --arg g "$group" --arg n "$name_hint" '
         .results[] |
-        if (.group == $g and (.name | ascii_downcase | contains($n | ascii_downcase))) then .id
+        if (.group == $g and (.name | ascii_downcase) == ($n | ascii_downcase)) then .id
         else empty end
     ' | head -1)
+    if [ -z "$id" ]; then
+        id=$(echo "$states" | jq -r --arg g "$group" --arg n "$name_hint" '
+            .results[] |
+            if (.group == $g and (.name | ascii_downcase | contains($n | ascii_downcase))) then .id
+            else empty end
+        ' | head -1)
+    fi
     if [ -z "$id" ]; then
         id=$(echo "$states" | jq -r --arg g "$group" '.results[] | select(.group == $g) | .id' | head -1)
     fi
@@ -139,6 +205,22 @@ _state_id_by_group_or_name() {
         exit 1
     fi
     echo "$id"
+}
+
+# Resolve a label's id by exact case-insensitive name match, or pass a UUID
+# straight through. Prints nothing if not found — callers decide whether
+# that is an error. per_page=200 avoids silently missing a label past page 1
+# on a project with many labels (e.g. a shared multi-project board).
+_label_id_by_name() {
+    local pid="$1" name_or_id="$2"
+    if [[ "$name_or_id" =~ ^[0-9a-f-]{36}$ ]]; then
+        echo "$name_or_id"
+        return
+    fi
+    _curl "$BASE/projects/$pid/labels/?per_page=200" \
+        | jq -r --arg n "$name_or_id" \
+        '.results[] | select(.name | ascii_downcase == ($n | ascii_downcase)) | .id' \
+        | head -1
 }
 
 # jq expression that strips noise keys from an issue object before returning it.
@@ -183,11 +265,69 @@ cmd_list_states() {
     _states "$pid" | jq '.results[] | {id, name, group}'
 }
 
+cmd_list_labels() {
+    local pid
+    pid=$(_project_id)
+    _curl "$BASE/projects/$pid/labels/?per_page=200" | jq '.results[] | {id, name}'
+}
+
 cmd_get_issue() {
     local issue_id="$1"
     local pid
     pid=$(_project_id)
     _curl "$BASE/projects/$pid/issues/$issue_id/" | jq "$_STRIP_NOISE"
+}
+
+# Look up an issue by its human-readable ref (project identifier + sequence
+# id, e.g. "TM-808" — the form shown in the Plane UI/URLs), as opposed to
+# get-issue which takes the internal UUID. Resolves the project by matching
+# the ref's prefix against each project's identifier (falls back to the
+# configured/default project if no match is found, in case the ref's prefix
+# does not correspond to a project identifier), then scans that project's
+# issues for a matching sequence_id. Output shape matches next-task: full
+# issue JSON plus its comments.
+cmd_get_task() {
+    local task_ref="$1"
+    if [[ ! "$task_ref" =~ ^([A-Za-z]+)-?([0-9]+)$ ]]; then
+        echo "ERROR: task ref must look like TM-808" >&2
+        exit 1
+    fi
+    local ident="${BASH_REMATCH[1]}"
+    local seq="${BASH_REMATCH[2]}"
+
+    local pid
+    pid=$(_curl "$BASE/projects/" \
+        | jq -r --arg i "$ident" '.results[] | select(.identifier != null and (.identifier | ascii_upcase) == ($i | ascii_upcase)) | .id' \
+        | head -1)
+    if [ -z "$pid" ]; then
+        pid=$(_project_id)
+    fi
+
+    local issues_tmp
+    issues_tmp=$(mktemp)
+    _curl "$BASE/projects/$pid/issues/?per_page=500&page=1" > "$issues_tmp"
+
+    local issue_id
+    issue_id=$(jq -r --argjson seq "$seq" '.results[] | select(.sequence_id == $seq) | .id' "$issues_tmp" | head -1)
+    rm -f "$issues_tmp"
+
+    if [ -z "$issue_id" ]; then
+        echo "ERROR: task $task_ref not found" >&2
+        exit 1
+    fi
+
+    local comments
+    comments=$(_curl "$BASE/projects/$pid/issues/$issue_id/comments/" \
+        | jq '[.results[] | {
+            id,
+            body: (.comment_html // "" | gsub("<[^>]*>"; "") | gsub("^\\s+|\\s+$"; "")),
+            images: [(.comment_html // "") | scan("<(?:image-component|img)[^>]*\\bsrc=\"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\"") | .[0]],
+            created_at
+        }] | sort_by(.created_at)')
+
+    _curl "$BASE/projects/$pid/issues/$issue_id/" | jq \
+        --argjson comments "$comments" \
+        ". + {comments: \$comments} | $_STRIP_NOISE"
 }
 
 cmd_next_task() {
@@ -216,17 +356,10 @@ cmd_next_task() {
     # Resolve label filter from PLANE_LABEL env var (name or UUID)
     local label_id=""
     if [ -n "${PLANE_LABEL:-}" ]; then
-        if [[ "${PLANE_LABEL}" =~ ^[0-9a-f-]{36}$ ]]; then
-            label_id="$PLANE_LABEL"
-        else
-            label_id=$(_curl "$BASE/projects/$pid/labels/" \
-                | jq -r --arg name "$PLANE_LABEL" \
-                '.results[] | select(.name | ascii_downcase == ($name | ascii_downcase)) | .id' \
-                | head -1)
-            if [ -z "$label_id" ]; then
-                echo "ERROR: label \"$PLANE_LABEL\" not found in project" >&2
-                exit 1
-            fi
+        label_id=$(_label_id_by_name "$pid" "$PLANE_LABEL")
+        if [ -z "$label_id" ]; then
+            echo "ERROR: label \"$PLANE_LABEL\" not found in project" >&2
+            exit 1
         fi
     fi
 
@@ -250,24 +383,35 @@ cmd_next_task() {
     # Blocking-relationship gate: Plane's v1 API does not expose issue-relations
     # (blocked_by/blocking) at all, so this approximates it via a text convention —
     # "Blocked by: #<sequence_id>" in description_html — instead of a real relations
-    # API call. Opt in with PLANE_RESPECT_BLOCKERS=1. A referenced sequence_id that
-    # can't be found among the currently-fetched issues fails open (not blocking),
-    # since it's more likely a stale/typo'd reference than an intentional gate.
+    # API call. Opt in with PLANE_RESPECT_BLOCKERS=1. By default a reference resolves
+    # only once the blocker reaches a completed/cancelled state (i.e. Done); appending
+    # "(review)" — e.g. "Blocked by: #<sequence_id> (review)" — loosens that single
+    # reference to resolve as soon as the blocker reaches a state whose name contains
+    # "review" (Done also satisfies it, since Done implies past review). A referenced
+    # sequence_id that can't be found among the currently-fetched issues fails open
+    # (not blocking), since it's more likely a stale/typo'd reference than an
+    # intentional gate.
     local next
     if [ "${PLANE_RESPECT_BLOCKERS:-0}" = "1" ]; then
         local resolved_ids
         resolved_ids=$(echo "$states" | jq -c '[.results[] | select(.group == "completed" or .group == "cancelled") | .id]')
 
+        local resolved_review_ids
+        resolved_review_ids=$(echo "$states" | jq -c '[.results[] | select(.group == "completed" or .group == "cancelled" or (.name | test("review"; "i"))) | .id]')
+
         local seq_to_state
         seq_to_state=$(jq -c '[.results[] | {(.sequence_id | tostring): .state}] | add // {}' "$issues_tmp")
 
-        next=$(printf '%s' "$candidates" | jq -c --argjson resolved "$resolved_ids" --argjson seqmap "$seq_to_state" '
-            def blocked_seq_ids:
+        next=$(printf '%s' "$candidates" | jq -c --argjson resolved "$resolved_ids" --argjson resolved_review "$resolved_review_ids" --argjson seqmap "$seq_to_state" '
+            def blocked_refs:
                 (.description_html // "") |
-                [scan("(?i)blocked[- ]by:?\\s*#?([0-9]+)")] | map(.[0] | tonumber);
+                [scan("(?i)blocked[- ]by:?\\s*#?([0-9]+)(?:\\s*\\(?(review)\\)?)?")] |
+                map({id: (.[0] | tonumber), review: (.[1] != null)});
             first(.[] | select(
-                (blocked_seq_ids | map($seqmap[. | tostring]) | map(select(. != null))) as $blocker_states |
-                ($blocker_states | all(. as $s | $resolved | index($s) != null))
+                (blocked_refs | map(. + {state: $seqmap[.id | tostring]}) | map(select(.state != null))) as $blockers |
+                ($blockers | all(
+                    . as $b | (if $b.review then $resolved_review else $resolved end) | index($b.state) != null
+                ))
             ))
         ')
     else
@@ -355,6 +499,26 @@ cmd_set_todo() {
         "$BASE/projects/$pid/issues/$issue_id/" | jq '{id, state, name}'
 }
 
+# Replace an existing issue's labels with a single label (name or UUID) —
+# e.g. to correct a task that was routed to the wrong sibling project after
+# the fact, without having to recreate it.
+cmd_set_label() {
+    local issue_id="${1:?issue_id required}"
+    local label_source="${2:?label required}"
+    local pid
+    pid=$(_project_id)
+
+    local label_id
+    label_id=$(_label_id_by_name "$pid" "$label_source")
+    if [ -z "$label_id" ]; then
+        echo "ERROR: label \"$label_source\" not found in project" >&2
+        exit 1
+    fi
+
+    _curl -X PATCH -d "{\"labels\": [\"$label_id\"]}" \
+        "$BASE/projects/$pid/issues/$issue_id/" | jq '{id, labels, name}'
+}
+
 # List tasks currently in the Review state (filtered by PLANE_LABEL).
 # Returns [{id, sequence_id, name, description_html}] — used by the loop's
 # pre-iteration sweep to re-check each PR's test status.
@@ -379,14 +543,7 @@ cmd_list_review() {
 
     local label_id=""
     if [ -n "${PLANE_LABEL:-}" ]; then
-        if [[ "${PLANE_LABEL}" =~ ^[0-9a-f-]{36}$ ]]; then
-            label_id="$PLANE_LABEL"
-        else
-            label_id=$(_curl "$BASE/projects/$pid/labels/" \
-                | jq -r --arg name "$PLANE_LABEL" \
-                '.results[] | select(.name | ascii_downcase == ($name | ascii_downcase)) | .id' \
-                | head -1)
-        fi
+        label_id=$(_label_id_by_name "$pid" "$PLANE_LABEL")
     fi
 
     local issues_tmp
@@ -561,17 +718,10 @@ cmd_task_in_progress() {
 
     local label_id=""
     if [ -n "${PLANE_LABEL:-}" ]; then
-        if [[ "${PLANE_LABEL}" =~ ^[0-9a-f-]{36}$ ]]; then
-            label_id="$PLANE_LABEL"
-        else
-            label_id=$(_curl "$BASE/projects/$pid/labels/" \
-                | jq -r --arg name "$PLANE_LABEL" \
-                '.results[] | select(.name | ascii_downcase == ($name | ascii_downcase)) | .id' \
-                | head -1)
-            if [ -z "$label_id" ]; then
-                echo "ERROR: label \"$PLANE_LABEL\" not found in project" >&2
-                exit 1
-            fi
+        label_id=$(_label_id_by_name "$pid" "$PLANE_LABEL")
+        if [ -z "$label_id" ]; then
+            echo "ERROR: label \"$PLANE_LABEL\" not found in project" >&2
+            exit 1
         fi
     fi
 
@@ -781,18 +931,43 @@ cmd_set_cancelled() {
         "$BASE/projects/$pid/issues/$issue_id/" | jq '{id, state, name}'
 }
 
+cmd_task_url() {
+    local issue_id="${1:?issue_id required}"
+    local pid
+    pid=$(_project_id)
+    echo "https://$PLANE_HOST/$PLANE_USERNAME/projects/$pid/issues/$issue_id/"
+}
+
 cmd_create_task() {
     local name="${1:?task name required}"
     local description="${2:-}"
     local priority="${3:-none}"
     local state_name="${4:-backlog}"
+    local label_override="${5:-}"
+    local link_from_id="${6:-}"
     local pid
     pid=$(_project_id)
 
-    # Resolve state by name (backlog or todo)
+    case "${priority,,}" in
+        urgent|high|medium|low|none) priority="${priority,,}" ;;
+        *)
+            echo "ERROR: unknown priority \"$priority\"; use one of urgent, high, medium, low, none" >&2
+            exit 1
+            ;;
+    esac
+
+    # Resolve state by name (backlog or todo). "todo" checks PLANE_STATE_TODO
+    # first, same as set-todo/next-task — without this, create-task fell back
+    # to a bare group+name-hint lookup even on a project where PLANE_STATE_TODO
+    # is already configured specifically because that project's states don't
+    # resolve reliably by name alone (e.g. more than one "unstarted" state
+    # whose name contains "todo").
     local state_id
     case "${state_name,,}" in
-        todo)    state_id=$(_state_id_by_group_or_name "$pid" "unstarted" "todo") ;;
+        todo)
+            state_id="${PLANE_STATE_TODO:-}"
+            [ -z "$state_id" ] && state_id=$(_state_id_by_group_or_name "$pid" "unstarted" "todo")
+            ;;
         backlog) state_id=$(_state_id_by_group_or_name "$pid" "backlog" "backlog") ;;
         *)
             echo "ERROR: unknown state \"$state_name\"; use backlog or todo" >&2
@@ -800,16 +975,20 @@ cmd_create_task() {
             ;;
     esac
 
-    # Resolve label from PLANE_LABEL if set (UUID or name)
+    # Resolve label: an explicit 5th arg wins (for a task meant for a sibling
+    # project that shares this Plane project's board, e.g. a php-labeled task
+    # filed from the python-labeled loop's own PLANE_LABEL); otherwise falls
+    # back to this project's own PLANE_LABEL, if set (UUID or name either way).
+    # An explicit label that cannot be resolved is an error, not a silent
+    # unlabeled/mislabeled task — that is exactly the "wrong project's label"
+    # failure mode this arg exists to prevent.
+    local label_source="${label_override:-${PLANE_LABEL:-}}"
     local label_id=""
-    if [ -n "${PLANE_LABEL:-}" ]; then
-        if [[ "${PLANE_LABEL}" =~ ^[0-9a-f-]{36}$ ]]; then
-            label_id="$PLANE_LABEL"
-        else
-            label_id=$(_curl "$BASE/projects/$pid/labels/" \
-                | jq -r --arg n "$PLANE_LABEL" \
-                '.results[] | select(.name | ascii_downcase == ($n | ascii_downcase)) | .id' \
-                | head -1)
+    if [ -n "$label_source" ]; then
+        label_id=$(_label_id_by_name "$pid" "$label_source")
+        if [ -z "$label_id" ]; then
+            echo "ERROR: label \"$label_source\" not found in project" >&2
+            exit 1
         fi
     fi
 
@@ -818,29 +997,55 @@ cmd_create_task() {
         desc_html="<p>$description</p>"
     fi
 
+    # Every new task is assigned to PLANE_ASSIGNEE_ID (the operator's member UUID)
+    # when configured, so tasks the agent files never sit unassigned. Absent =
+    # no assignee, same behavior as before this key existed.
     local payload
     payload=$(jq -n \
         --arg name "$name" \
         --arg desc "$desc_html" \
         --arg priority "$priority" \
         --arg state "$state_id" \
-        --arg lbl "$label_id" '
+        --arg lbl "$label_id" \
+        --arg assignee "${PLANE_ASSIGNEE_ID:-}" '
         {name: $name, priority: $priority, state: $state} +
         (if $desc != "" then {description_html: $desc} else {} end) +
-        (if $lbl != "" then {labels: [$lbl]} else {} end)
+        (if $lbl != "" then {labels: [$lbl]} else {} end) +
+        (if $assignee != "" then {assignees: [$assignee]} else {} end)
     ')
 
-    _curl -X POST -d "$payload" \
-        "$BASE/projects/$pid/issues/" | jq '{id, sequence_id, name, priority, state}'
+    local result
+    result=$(_curl -X POST -d "$payload" "$BASE/projects/$pid/issues/")
+
+    # Auto-link: if a 6th arg (the calling task's own id) was passed, append
+    # a clickable link to the newly created task onto that task's description
+    # — the fiddly part of "create a related task" (build the URL, append the
+    # HTML) so the agent does not have to do it as a separate manual step.
+    if [ -n "$link_from_id" ]; then
+        local new_id new_seq new_name new_url link_html
+        new_id=$(echo "$result" | jq -r '.id')
+        new_seq=$(echo "$result" | jq -r '.sequence_id')
+        new_name=$(echo "$result" | jq -r '.name')
+        new_url=$(cmd_task_url "$new_id")
+        link_html=$(jq -rn --arg u "$new_url" --arg s "$new_seq" --arg n "$new_name" \
+            '"<p>Related: <a href=\"" + $u + "\">#" + $s + " " + $n + "</a></p>"')
+        printf '%s' "$link_html" | cmd_append_description "$link_from_id" >/dev/null
+    fi
+
+    echo "$result" | jq '{id, sequence_id, name, priority, state}'
 }
 
 # Create a new page in the project. A plain-text description is wrapped in
-# <p>; a string already containing tags is sent through as-is (HTML).
+# <p>; a string already containing tags is sent through as-is (HTML). Prefix
+# description with "@" to read it from a file instead (e.g. @page.html) —
+# mirrors curl's -d @file convention.
 cmd_create_page() {
     local name="${1:?page name required}"
     local description="${2:-}"
     local pid
     pid=$(_project_id)
+
+    description=$(_resolve_at_file "$description")
 
     local desc_html=""
     if [ -n "$description" ]; then
@@ -852,35 +1057,79 @@ cmd_create_page() {
     fi
 
     local payload
-    payload=$(jq -n \
-        --arg name "$name" \
-        --arg desc "$desc_html" '
+    payload=$(_jq_with_desc "$desc_html" \
+        --arg name "$name" '
         {name: $name} +
         (if $desc != "" then {description_html: $desc} else {} end)
     ')
 
-    _curl -X POST -d "$payload" \
-        "$BASE/projects/$pid/pages/" | jq '{id, name, access}'
+    _curl -X POST -d @- \
+        "$BASE/projects/$pid/pages/" <<< "$payload" | jq '{id, name, access}'
 }
 
 cmd_get_page() {
     local page_id="${1:?page_id required}"
+    local out_file="${2:-}"
     local pid
     pid=$(_project_id)
-    _curl "$BASE/projects/$pid/pages/$page_id/" | jq '.'
+    local page
+    page=$(_curl "$BASE/projects/$pid/pages/$page_id/")
+
+    if [ -n "$out_file" ]; then
+        jq -r '.description_html // ""' <<< "$page" > "$out_file"
+        jq -n --arg id "$page_id" --arg f "$out_file" '{id: $id, saved_to: $f}'
+    else
+        jq '.' <<< "$page"
+    fi
 }
 
-# Direct lookup of the project's main doc page via its known id, so the agent
-# does not have to re-run search-pages (a fuzzy substring search, not an exact
-# match) every iteration. Requires PLANE_MAIN_DOC_PAGE_ID in .env — see
-# how-to-add-plane-pages.md for how that gets set the first time the main page
-# is created.
+# Get a project's root doc page, creating it if it does not exist yet.
+# env_key defaults to PLANE_MAIN_DOC_PAGE_ID (the single-hierarchy case) but
+# any PLANE_* key can be passed — e.g. a dual-hierarchy project tracks two
+# independent roots under PLANE_DEV_DOCS_PAGE_ID/PLANE_USER_DOCS_PAGE_ID,
+# found/created by calling this twice with different (name, env_key) pairs.
+# Fast path: env_key already set in .env -> direct get-page, no search. Slow
+# path (first run only): search for a page named exactly <page_name>; if
+# none is found, create it. Either way, the resolved id is persisted to
+# env_key in .env so every later call takes the fast path. The response
+# always includes "just_created": true/false so the agent knows whether
+# this is a brand-new, still-empty page (safe to populate with landing-page
+# content) or an existing one (must not clobber what is already there).
 cmd_main_page() {
-    if [ -z "${PLANE_MAIN_DOC_PAGE_ID:-}" ]; then
-        echo "ERROR: PLANE_MAIN_DOC_PAGE_ID not set in .env — run 'search-pages <project-name>' to find the main page (or create-page to make it), then add PLANE_MAIN_DOC_PAGE_ID=<id> to .env." >&2
+    local page_name="${1:-}"
+    local env_key="${2:-PLANE_MAIN_DOC_PAGE_ID}"
+    local current_id="${!env_key:-}"
+
+    if [ -n "$current_id" ]; then
+        cmd_get_page "$current_id" | jq '. + {just_created: false}'
+        return
+    fi
+
+    if [ -z "$page_name" ]; then
+        echo "ERROR: $env_key not set in .env and no page name given — run 'main-page <page-name> [$env_key]' once so the page can be found or created." >&2
         exit 1
     fi
-    cmd_get_page "$PLANE_MAIN_DOC_PAGE_ID"
+
+    local pid
+    pid=$(_project_id)
+
+    local existing_id
+    existing_id=$(_curl -G "$BASE/projects/$pid/pages/search/" --data-urlencode "search=$page_name" \
+        | jq -r --arg n "$page_name" '[.[] | select(.name == $n and .archived_at == null)] | .[0].id // empty')
+
+    local page_id just_created
+    if [ -n "$existing_id" ]; then
+        page_id="$existing_id"
+        just_created=false
+    else
+        page_id=$(_curl -X POST -d "$(jq -n --arg name "$page_name" '{name: $name}')" \
+            "$BASE/projects/$pid/pages/" | jq -r '.id')
+        just_created=true
+    fi
+
+    _persist_env_key "$env_key" "$page_id"
+
+    cmd_get_page "$page_id" | jq --argjson c "$just_created" '. + {just_created: $c}'
 }
 
 # Plane/PageDetail has no url/web_url field, so the web-app link has to be
@@ -893,33 +1142,19 @@ cmd_page_url() {
     echo "https://$PLANE_HOST/$PLANE_USERNAME/projects/$pid/pages/$page_id/"
 }
 
-# Append HTML (read from stdin) to the END of a page's existing
-# description_html — mirrors append-description for issues. Used to add a
-# link to a newly created page onto the main page without having to fetch
-# and resend its whole existing content by hand.
-cmd_append_to_page() {
-    local page_id="${1:?page_id required}"
-    local pid
-    pid=$(_project_id)
-    local frag
-    frag=$(cat)
-    local current_desc
-    current_desc=$(_curl "$BASE/projects/$pid/pages/$page_id/" | jq -r '.description_html // ""')
-    local payload
-    payload=$(jq -n --arg d "${current_desc}${frag}" '{description_html: $d}')
-    _curl -X PATCH -d "$payload" "$BASE/projects/$pid/pages/$page_id/" \
-        | jq '{id, name, description_html}'
-}
-
 # Patch a page's name and/or description_html. Either arg may be "" to leave
 # that field untouched. A plain-text description is wrapped in <p>; a string
-# already containing tags is sent through as-is (HTML).
+# already containing tags is sent through as-is (HTML). Prefix description
+# with "@" to read it from a file instead (e.g. @page.html) — mirrors curl's
+# -d @file convention.
 cmd_edit_page() {
     local page_id="${1:?page_id required}"
     local name="${2:-}"
     local description="${3:-}"
     local pid
     pid=$(_project_id)
+
+    description=$(_resolve_at_file "$description")
 
     local desc_html=""
     if [ -n "$description" ]; then
@@ -931,9 +1166,8 @@ cmd_edit_page() {
     fi
 
     local payload
-    payload=$(jq -n \
-        --arg name "$name" \
-        --arg desc "$desc_html" '
+    payload=$(_jq_with_desc "$desc_html" \
+        --arg name "$name" '
         (if $name != "" then {name: $name} else {} end) +
         (if $desc != "" then {description_html: $desc} else {} end)
     ')
@@ -943,8 +1177,16 @@ cmd_edit_page() {
         exit 1
     fi
 
-    _curl -X PATCH -d "$payload" \
-        "$BASE/projects/$pid/pages/$page_id/" | jq '{id, name, access, description_html}'
+    _curl -X PATCH -d @- \
+        "$BASE/projects/$pid/pages/$page_id/" <<< "$payload" | jq '{id, name, access, description_html}'
+}
+
+# Rename a page without touching its description_html — thin wrapper over
+# edit-page for the common case where only the name is changing.
+cmd_rename_page() {
+    local page_id="${1:?page_id required}"
+    local name="${2:?new name required}"
+    cmd_edit_page "$page_id" "$name" ""
 }
 
 # Delete a page. Plane's API only allows deleting an already-archived page
@@ -986,36 +1228,6 @@ cmd_search_pages() {
         | jq 'map({id, name, access, archived_at, updated_at})'
 }
 
-# Literal (non-regex) search/replace within a page's description_html.
-# Uses jq split/join rather than gsub so regex metacharacters in the search
-# string (., *, etc.) are matched literally.
-cmd_replace_in_page() {
-    local page_id="${1:?page_id required}"
-    local search="${2:?search string required}"
-    local replace="${3:-}"
-    local pid
-    pid=$(_project_id)
-
-    local current_desc
-    current_desc=$(_curl "$BASE/projects/$pid/pages/$page_id/" | jq -r '.description_html // ""')
-
-    local count
-    count=$(jq -n --arg d "$current_desc" --arg s "$search" '($d | split($s) | length) - 1')
-
-    if [ "$count" -eq 0 ]; then
-        echo "ERROR: search string not found in page $page_id" >&2
-        exit 1
-    fi
-
-    local new_desc
-    new_desc=$(jq -n -r --arg d "$current_desc" --arg s "$search" --arg r "$replace" '$d | split($s) | join($r)')
-
-    local payload
-    payload=$(jq -n --arg d "$new_desc" '{description_html: $d}')
-
-    _curl -X PATCH -d "$payload" "$BASE/projects/$pid/pages/$page_id/" \
-        | jq --argjson count "$count" '{id, name, replacements: $count}'
-}
 
 # Upload a file as an issue attachment and mark it uploaded, in one shot:
 # create the attachment (presigned S3 POST), stream the file straight to that
@@ -1133,6 +1345,7 @@ case "$CMD" in
     set-in-progress)     cmd_set_in_progress "${1:?issue_id required}" ;;
     set-review)          cmd_set_review "${1:?issue_id required}" ;;
     set-todo)            cmd_set_todo "${1:?issue_id required}" ;;
+    set-label)            cmd_set_label "${1:?issue_id required}" "${2:?label required}" ;;
     list-review)         cmd_list_review ;;
     set-done)            cmd_set_done "${1:?issue_id required}" ;;
     set-cancelled)       cmd_set_cancelled "${1:?issue_id required}" ;;
@@ -1143,29 +1356,31 @@ case "$CMD" in
     update-description)  cmd_update_description "${1:?issue_id required}" ;;
     append-description)  cmd_append_description "${1:?issue_id required}" ;;
     prepend-description) cmd_prepend_description "${1:?issue_id required}" ;;
-    create-task)         cmd_create_task "${1:?task name required}" "${2:-}" "${3:-none}" "${4:-backlog}" ;;
+    create-task)         cmd_create_task "${1:?task name required}" "${2:-}" "${3:-none}" "${4:-backlog}" "${5:-}" "${6:-}" ;;
+    task-url)             cmd_task_url "${1:?issue_id required}" ;;
     create-page)         cmd_create_page "${1:?page name required}" "${2:-}" ;;
-    main-page)            cmd_main_page ;;
+    main-page)            cmd_main_page "${1:-}" "${2:-}" ;;
     page-url)             cmd_page_url "${1:?page_id required}" ;;
-    append-to-page)       cmd_append_to_page "${1:?page_id required}" ;;
-    get-page)             cmd_get_page "${1:?page_id required}" ;;
+    get-page)             cmd_get_page "${1:?page_id required}" "${2:-}" ;;
     edit-page)            cmd_edit_page "${1:?page_id required}" "${2:-}" "${3:-}" ;;
+    rename-page)          cmd_rename_page "${1:?page_id required}" "${2:?new name required}" ;;
     remove-page)          cmd_remove_page "${1:?page_id required}" ;;
     archive-page)         cmd_archive_page "${1:?page_id required}" ;;
     unarchive-page)       cmd_unarchive_page "${1:?page_id required}" ;;
     search-pages)         cmd_search_pages "${1:?search query required}" ;;
-    replace-in-page)      cmd_replace_in_page "${1:?page_id required}" "${2:?search string required}" "${3:-}" ;;
     done-in-period)   cmd_done_in_period "${1:?from_date required}" "${2:-}" ;;
     review-done-in-period) cmd_review_done_in_period "${1:?from_date required}" "${2:-}" ;;
     get-issue)        cmd_get_issue "${1:?issue_id required}" ;;
+    get-task)         cmd_get_task "${1:?task ref required, e.g. TM-808}" ;;
     list-states)      cmd_list_states ;;
+    list-labels)      cmd_list_labels ;;
     list-projects)    cmd_list_projects ;;
     upload-asset)     cmd_upload_asset "${1:?file path required}" "${2:?issue_id required}" "${3:-}" ;;
     download-asset)   cmd_download_asset "${1:?asset_id required}" "${2:?output_path required}" "${3:?issue_id required}" "${4:-}" ;;
     list-images)      cmd_list_images "${1:?issue_id required}" ;;
     *)
         echo "Usage: $0 <command> [args]"
-        echo "Commands: next-task | task-in-progress | set-in-progress <id> | set-review <id> | set-todo <id> | list-review | set-done <id> | set-cancelled <id> | set-branch <id> <branch> | set-pr <id> <pr_url> | add-comment <id> <html> | get-comments <id> | update-description <id> | append-description <id> | prepend-description <id> | create-task <name> [desc] [priority] [backlog|todo] | create-page <name> [desc_html] | main-page | page-url <id> | append-to-page <id> | get-page <id> | edit-page <id> [name] [desc_html] | remove-page <id> | archive-page <id> | unarchive-page <id> | search-pages <query> | replace-in-page <id> <search> <replace> | done-in-period <from> [<to>] | review-done-in-period <from> [<to>] | get-issue <id> | list-states | list-projects | upload-asset <file> <issue_id> [project_id] | download-asset <asset_id> <out_path> <issue_id> [project_id] | list-images <issue_id>"
+        echo "Commands: next-task | task-in-progress | set-in-progress <id> | set-review <id> | set-todo <id> | set-label <id> <label> | list-review | set-done <id> | set-cancelled <id> | set-branch <id> <branch> | set-pr <id> <pr_url> | add-comment <id> <html> | get-comments <id> | update-description <id> | append-description <id> | prepend-description <id> | create-task <name> [desc] [priority] [backlog|todo] [label] [link_from_id] | task-url <id> | create-page <name> [desc_html|@file] | main-page [page_name] [env_key] | page-url <id> | get-page <id> [out_file] | edit-page <id> [name] [desc_html|@file] | rename-page <id> <name> | remove-page <id> | archive-page <id> | unarchive-page <id> | search-pages <query> | done-in-period <from> [<to>] | review-done-in-period <from> [<to>] | get-issue <id> | get-task <ref, e.g. TM-808> | list-states | list-labels | list-projects | upload-asset <file> <issue_id> [project_id] | download-asset <asset_id> <out_path> <issue_id> [project_id] | list-images <issue_id>"
         exit 1
         ;;
 esac

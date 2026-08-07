@@ -12,6 +12,7 @@
 #                                                  [{id, path, line, startLine, side, outdated, author, url, body, diffHunk}]
 #   github.sh resolve-thread <thread_id>    — mark a review thread resolved
 #   github.sh create-pr <base> <head> <title> <body>  — create a PR, print its URL
+#   github.sh deploy <workflow> <branch>    — trigger a GitHub Actions workflow_dispatch (e.g. to deploy <branch> to a preview/dev environment)
 #
 # Required in .env: GH_OWNER (repo owner/org), GH_REPO (repo name)
 # Optional in .env: PR_CI_CHECK_PATTERNS — comma-separated, case-insensitive
@@ -21,13 +22,23 @@
 
 set -euo pipefail
 
-# Load GH_*/PR_* keys from .env if present and not already exported (mirrors
-# the regex-based loader in plane.sh/ralph-plane.sh rather than `source`, to
-# avoid choking on shell-special characters in unrelated .env values).
+# Load GH_*/PR_* keys from .env if present and not already set (mirrors the
+# regex-based loader in plane.sh/ralph-plane.sh rather than `source`, to avoid
+# choking on shell-special characters in unrelated .env values).
+#
+# Deliberately NOT exported: `gh` itself reserves GH_REPO (and GH_HOST) as an
+# override that repoints every command at "[HOST/]OWNER/REPO" — our GH_REPO
+# only ever holds the bare repo name, so exporting it under that exact name
+# made every unscoped `gh` call in this script fail with `expected the
+# "[HOST/]OWNER/REPO" format` (and cmd_pr_state's `|| echo "NONE"` silently
+# turned that failure into a false "no PR" result). Nothing downstream needs
+# these in the actual process environment — every use below is this script's
+# own `$GH_OWNER`/`$GH_REPO`/`$PR_CI_CHECK_PATTERNS` shell variables, or an
+# explicit `-F owner=.../-F repo=...` GraphQL argument, never env-inherited.
 if [ -f .env ]; then
     while IFS='=' read -r key value; do
         if [[ "$key" =~ ^(GH|PR)_[A-Z_]+$ ]] && [ -z "${!key:-}" ]; then
-            export "$key=$value"
+            printf -v "$key" '%s' "$value"
         fi
     done < <(grep -E '^(GH|PR)_[A-Z_]+=' .env)
 fi
@@ -48,7 +59,15 @@ cmd_pr_url() {
 
 cmd_pr_state() {
     local branch="${1:?branch required}"
-    gh pr list --head "$branch" --json state --jq '.[0].state // "NONE"' 2>/dev/null || echo "NONE"
+    local out
+    if out=$(gh pr list --head "$branch" --json state --jq '.[0].state // "NONE"' 2>&1); then
+        echo "$out"
+    else
+        # Surface the real gh error on stderr instead of silently reporting
+        # "NONE" — a false "no PR" can trigger a needless new branch/PR.
+        echo "WARNING: gh pr list failed for branch $branch: $out" >&2
+        echo "NONE"
+    fi
 }
 
 # Aggregate conclusion of every PR check whose name matches any pattern in
@@ -155,6 +174,12 @@ cmd_create_pr() {
     gh pr create --base "$base" --head "$head" --title "$title" --body "$body"
 }
 
+cmd_deploy() {
+    local workflow="${1:?workflow required (e.g. deploy-ralph.yml)}"
+    local branch="${2:?branch required}"
+    gh workflow run "$workflow" --ref "$branch"
+}
+
 CMD="${1:-}"
 shift || true
 
@@ -166,9 +191,10 @@ case "$CMD" in
     unresolved-threads)  cmd_unresolved_threads "${1:-}" ;;
     resolve-thread)      cmd_resolve_thread "${1:-}" ;;
     create-pr)           cmd_create_pr "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
+    deploy)              cmd_deploy "${1:-}" "${2:-}" ;;
     *)
         echo "Usage: $0 <command> [args]"
-        echo "Commands: pr-number <branch> | pr-url <branch> | pr-state <branch> | tests-status <branch> | unresolved-threads <branch> | resolve-thread <thread_id> | create-pr <base> <head> <title> <body>"
+        echo "Commands: pr-number <branch> | pr-url <branch> | pr-state <branch> | tests-status <branch> | unresolved-threads <branch> | resolve-thread <thread_id> | create-pr <base> <head> <title> <body> | deploy <workflow> <branch>"
         exit 1
         ;;
 esac
