@@ -839,3 +839,24 @@ class KeyboardFactory:
             keyboard.append(keyboard_row)
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @classmethod
+    def create_inline_keyboard_with_buttons(
+        cls,
+        buttons: list[list[InlineKeyboardButton]],
+    ) -> InlineKeyboardMarkup:
+        """
+        Create an inline keyboard from InlineKeyboardButton objects.
+
+        Use this when you need button types other than callback (e.g. URL buttons).
+
+        Args:
+            buttons: List of rows, each row is a list of InlineKeyboardButton objects
+
+        Example:
+            keyboard = KeyboardFactory.create_inline_keyboard_with_buttons([
+                [InlineKeyboardButton(text="Visit", url="https://example.com")],
+                [InlineKeyboardButton(text="OK", callback_data="ok")],
+            ])
+        """
+        return InlineKeyboardMarkup(inline_keyboard=buttons)

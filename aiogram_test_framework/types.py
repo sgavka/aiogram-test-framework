@@ -88,6 +88,21 @@ class CapturedRequest:
         """Get the reply_markup from the request params if present."""
         return self.params.get("reply_markup")
 
+    def get_inline_buttons(self) -> list[dict]:
+        """Get all inline keyboard buttons as a flat list of dicts."""
+        markup = self.reply_markup
+        if not markup:
+            return []
+        return [btn for row in markup.get("inline_keyboard", []) for btn in row]
+
+    def get_button_by_text(self, text: str) -> Optional[dict]:
+        """Find an inline keyboard button by its text label.
+
+        Works for any button type (callback, URL, switch_inline_query, etc.).
+        Returns the raw button dict, or None if not found.
+        """
+        return next((b for b in self.get_inline_buttons() if b.get("text") == text), None)
+
     def __repr__(self) -> str:
         text_preview = ""
         if self.text:
