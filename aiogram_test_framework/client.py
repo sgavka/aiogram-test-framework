@@ -431,6 +431,31 @@ class TestClient:
 
         return self._capture.all_requests[initial_count:]
 
+    def patch_bot(self, bot: Bot) -> None:
+        """
+        Replace a bot's session with the framework's mock session.
+
+        Use this to test handlers that reference a module-level bot instance
+        instead of using dependency injection or message.bot.
+
+        Args:
+            bot: The bot instance to patch
+
+        Example:
+            real_bot = Bot(token="123:ABC")  # module-level bot used in handlers
+
+            def setup(bot, dp):
+                dp.include_router(router)
+
+            client = await TestClient.create(..., setup_dispatcher_func=setup)
+            client.patch_bot(real_bot)  # intercept real_bot's API calls
+
+            user = client.create_user()
+            await user.send_message("hello")
+            assert user.get_last_message() is not None
+        """
+        bot.session = self._bot.mock_session
+
     def set_next_dice_value(self, value: int) -> None:
         """
         Set the value for the next dice roll.

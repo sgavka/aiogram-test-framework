@@ -267,6 +267,49 @@ class TestMultipleUsers:
         assert user2_last is not None
         assert "Welcome" in user2_last.text
 
+    async def test_bot_routes_message_to_other_user(self):
+        """
+        Regression test for GitHub issue #2: when the bot sends a message to a
+        different user than the one who triggered the handler, get_last_message()
+        on the recipient user must return that message.
+        """
+        USER_ID = 1
+        SUPPORT_ID = 2
+
+        def setup_router(bot: Bot, dispatcher: Dispatcher) -> None:
+            router = Router()
+
+            @router.message()
+            async def forward(message: Message, bot: Bot) -> None:
+                if message.from_user.id == SUPPORT_ID:
+                    await bot.send_message(USER_ID, "hi from support")
+                else:
+                    await bot.send_message(SUPPORT_ID, "hello from user")
+
+            dispatcher.include_router(router)
+
+        client = await TestClient.create(
+            bot_token="123456:ABC-DEF",
+            bot_id=123456,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+            setup_dispatcher_func=setup_router,
+        )
+
+        user = client.create_user(USER_ID)
+        support_agent = client.create_user(SUPPORT_ID)
+
+        await support_agent.send_message("abc123")
+        assert user.get_last_message() is not None
+        assert user.get_last_message().text == "hi from support"
+        assert support_agent.get_last_message() is None
+
+        await user.send_message("abc123")
+        assert support_agent.get_last_message() is not None
+        assert support_agent.get_last_message().text == "hello from user"
+
+        await client.close()
+
 
 class TestRequestCapturing:
     """Test request capturing functionality."""
