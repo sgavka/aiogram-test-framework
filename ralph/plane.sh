@@ -8,6 +8,7 @@
 #   docs/plane.sh set-todo <id>                          — move issue back to "Todo" state (automation-internal)
 #   docs/plane.sh set-label <id> <label>                  — replace an issue's labels with a single label (name or UUID) — e.g. to fix a task routed to the wrong sibling project
 #   docs/plane.sh list-review                            — Review-state tasks [{id,sequence_id,name,description_html}]
+#   docs/plane.sh list-blocked                           — Todo tasks held back by an unresolved "Blocked by: #<seq>" reference, with each blocker's sequence_id/name/state and whether it is a plain (Done) or "(review)" gate. The read-only counterpart to next-task's blocker gate; evaluates blockers regardless of PLANE_RESPECT_BLOCKERS
 #   docs/plane.sh add-comment <id> <html>                — post a comment on an issue (body must be HTML)
 #   docs/plane.sh get-comments <id>                      — list all comments on an issue as JSON
 #   docs/plane.sh update-description <id>                — replace description_html (reads new HTML from stdin)
@@ -69,7 +70,9 @@
 #                   PLANE_STATE_REVIEW      (default: searches by name containing "review")
 #                   PLANE_STATE_DONE        (default: searches completed group for name "done")
 #                   PLANE_STATE_CANCELLED   (default: first state in cancelled group)
-#                   PLANE_LABEL             (name or UUID; next-task/task-in-progress only returns issues with this label)
+#                   PLANE_LABEL             (name or UUID; next-task/task-in-progress/list-blocked only return issues with this
+#                                            label. Set but unresolvable is a HARD ERROR, not a silently-dropped filter — a
+#                                            loop on a shared board must never fall back to seeing every project's tasks)
 #                   PLANE_RESPECT_BLOCKERS  (1 to skip next-task candidates blocked by an unresolved "Blocked by: #<seq>" reference;
 #                                            add "(review)" — e.g. "Blocked by: #<seq> (review)" — to resolve as soon as the
 #                                            blocker reaches a Review-named state instead of waiting for Done/Cancelled)
@@ -223,6 +226,61 @@ _label_id_by_name() {
         | head -1
 }
 
+# Fetch every issue in the project, following the API's own cursor pagination,
+# and print a single {"results": [...]} object (the shape every caller's jq
+# filter already expects).
+#
+# $1 = project id
+# $2 = comma-separated `fields=` projection. Include every key the caller's jq
+#      filter reads — a key left out of the projection is absent from the
+#      response, not null.
+#
+# Two API behaviours this works around, both measured live against
+# tasks.jobscanner.pro on 2026-08-27 (Plane task TM-1450):
+#
+#   - `page=` is ignored by this Plane version. `page=1`, `page=2` and `page=3`
+#     all return the identical newest-`per_page` window, so the previous
+#     `?per_page=500&page=1` call could only ever see the newest 500 issues of
+#     a project. On a 1393-issue board that made every Todo older than that
+#     window permanently invisible to `next-task`. Real pagination is the
+#     `next_cursor` string the response carries (e.g. "500:1:0"), fed back as
+#     `?cursor=`; `next_page_results` says whether another page exists.
+#
+#   - There is NO server-side filtering. `state=`, `labels=` and `state__id=`
+#     are all silently accepted and ignored (`total_count` stays at the full
+#     project count), so state/label filtering has to remain client-side —
+#     do not "optimise" a caller by moving its jq `select` into the query
+#     string. What the API *does* honour is `fields=`, a server-side
+#     projection, and that is the whole reason full pagination is affordable:
+#     dropping `description_html` alone takes a 500-row page from 3.8 MB /21s
+#     to 130 KB /12s, so reading all 1393 rows costs about 30s in total
+#     instead of the ~90s the fat projection would have needed. It also makes
+#     a Cloudflare 524 on the call much less likely (see v64).
+_all_issues() {
+    local pid="$1" fields="$2"
+    local per_page="${PLANE_PAGE_SIZE:-1000}"
+    local max_pages="${PLANE_MAX_PAGES:-20}"
+    local cursor="" url page pages=0
+    local tmp
+    tmp=$(mktemp)
+    while :; do
+        url="$BASE/projects/$pid/issues/?per_page=${per_page}&fields=${fields}"
+        [ -n "$cursor" ] && url="${url}&cursor=${cursor}"
+        page=$(_curl "$url")
+        printf '%s\n' "$page" >> "$tmp"
+        pages=$((pages + 1))
+        [ "$(printf '%s' "$page" | jq -r '.next_page_results // false')" = "true" ] || break
+        cursor=$(printf '%s' "$page" | jq -r '.next_cursor // empty')
+        [ -n "$cursor" ] || break
+        if [ "$pages" -ge "$max_pages" ]; then
+            echo "WARNING: stopped after $pages pages (PLANE_MAX_PAGES=$max_pages) — some issues were not read" >&2
+            break
+        fi
+    done
+    jq -s '{results: (map(.results // []) | add // [])}' "$tmp"
+    rm -f "$tmp"
+}
+
 # jq expression that strips noise keys from an issue object before returning it.
 # sequence_id is intentionally KEPT (used for branch names / PR bodies).
 _STRIP_NOISE='del(.point, .description_binary, .start_date, .target_date, .sort_order, .is_draft, .external_source, .external_id, .project, .workspace, .estimate_point, .description_text)'
@@ -268,7 +326,7 @@ cmd_list_states() {
 cmd_list_labels() {
     local pid
     pid=$(_project_id)
-    _curl "$BASE/projects/$pid/labels/?per_page=200" | jq '.results[] | {id, name}'
+    _curl "$BASE/projects/$pid/labels/?per_page=200" | jq '[.results[] | {id, name}]'
 }
 
 cmd_get_issue() {
@@ -305,7 +363,7 @@ cmd_get_task() {
 
     local issues_tmp
     issues_tmp=$(mktemp)
-    _curl "$BASE/projects/$pid/issues/?per_page=500&page=1" > "$issues_tmp"
+    _all_issues "$pid" "id,sequence_id" > "$issues_tmp"
 
     local issue_id
     issue_id=$(jq -r --argjson seq "$seq" '.results[] | select(.sequence_id == $seq) | .id' "$issues_tmp" | head -1)
@@ -316,6 +374,70 @@ cmd_get_task() {
         exit 1
     fi
 
+    _issue_with_comments "$pid" "$issue_id"
+}
+
+# Shared by next-task, list-blocked and (for its own state filter) task-in-progress:
+# the comma-separated list of Todo state ids, from PLANE_STATE_TODO when set,
+# otherwise every state in the "unstarted" group (Backlog is staging, not ready
+# to implement, and lives in its own group).
+_todo_state_ids() {
+    local states="$1"
+    if [ -n "${PLANE_STATE_TODO:-}" ]; then
+        printf '%s' "$PLANE_STATE_TODO"
+        return
+    fi
+    local ids
+    ids=$(echo "$states" | jq -r '.results[] | select(.group == "unstarted") | .id' | tr '\n' ',')
+    printf '%s' "${ids%,}"
+}
+
+# Resolve PLANE_LABEL to a label id, or print nothing when PLANE_LABEL is unset.
+# A set-but-unresolvable label is a hard error: silently dropping the filter
+# would make a project's loop pick up every other project's tasks off a shared
+# board (see the onboarding notes in CLAUDE.md).
+_required_label_id() {
+    local pid="$1"
+    [ -n "${PLANE_LABEL:-}" ] || return 0
+    local label_id
+    label_id=$(_label_id_by_name "$pid" "$PLANE_LABEL")
+    if [ -z "$label_id" ]; then
+        echo "ERROR: label \"$PLANE_LABEL\" not found in project" >&2
+        exit 1
+    fi
+    printf '%s' "$label_id"
+}
+
+# jq program shared by next-task and list-blocked. Given a candidate issue's
+# description_html (as $desc), the seq -> state map ($seqmap) and the two
+# resolved-state id lists, emit {blocked: bool, blockers: [{id, review, state,
+# resolved}]}.
+#
+# Plane's v1 API does not expose issue-relations (blocked_by/blocking) at all,
+# so this approximates them via a text convention — "Blocked by: #<sequence_id>"
+# in description_html. By default a reference resolves only once the blocker
+# reaches a completed/cancelled state (i.e. Done); appending "(review)" — e.g.
+# "Blocked by: #<sequence_id> (review)" — loosens that single reference to
+# resolve as soon as the blocker reaches a state whose name contains "review"
+# (Done also satisfies it, since Done implies past review). A referenced
+# sequence_id that cannot be found among the fetched issues fails open (not
+# blocking), since it is more likely a stale/typo'd reference than a real gate.
+_BLOCKER_JQ='
+    def blocked_refs:
+        [scan("(?i)blocked[- ]by:?\\s*#?([0-9]+)(?:\\s*\\(?(review)\\)?)?")] |
+        map({id: (.[0] | tonumber), review: (.[1] != null)});
+    ($desc | blocked_refs)
+    | map(. + {state: $seqmap[.id | tostring]})
+    | map(select(.state != null))
+    | map(. as $b | $b + {resolved: ((if $b.review then $resolved_review else $resolved end) | index($b.state) != null)})
+    | {blocked: (map(.resolved) | all | not), blockers: .}
+'
+
+# Fetch an issue by id and append its comments, as next-task/task-in-progress
+# both return it. Kept separate from cmd_get_issue so the two selection paths
+# stay one function call away from the exact response shape the loop injects.
+_issue_with_comments() {
+    local pid="$1" issue_id="$2"
     local comments
     comments=$(_curl "$BASE/projects/$pid/issues/$issue_id/comments/" \
         | jq '[.results[] | {
@@ -340,109 +462,142 @@ cmd_next_task() {
     states=$(_states "$pid")
 
     local todo_ids
-    if [ -n "${PLANE_STATE_TODO:-}" ]; then
-        todo_ids="$PLANE_STATE_TODO"
-    else
-        # Collect IDs of unstarted (Todo) states only — Backlog is staging, not ready to implement
-        todo_ids=$(echo "$states" | jq -r '.results[] | select(.group == "unstarted") | .id' | tr '\n' ',')
-        todo_ids="${todo_ids%,}"
-    fi
-
+    todo_ids=$(_todo_state_ids "$states")
     if [ -z "$todo_ids" ]; then
         echo '{"error": "no todo states found"}' >&2
         exit 1
     fi
 
-    # Resolve label filter from PLANE_LABEL env var (name or UUID)
-    local label_id=""
-    if [ -n "${PLANE_LABEL:-}" ]; then
-        label_id=$(_label_id_by_name "$pid" "$PLANE_LABEL")
-        if [ -z "$label_id" ]; then
-            echo "ERROR: label \"$PLANE_LABEL\" not found in project" >&2
-            exit 1
-        fi
-    fi
+    local label_id
+    label_id=$(_required_label_id "$pid")
 
-    # Fetch all issues into a temp file (large per_page avoids pagination; temp file avoids ARG_MAX)
+    # Lean projection on purpose: description_html is NOT fetched for the whole
+    # board (that is what made this call 3.8 MB / 20-55s and prone to Cloudflare
+    # 524s). It is read per candidate below, and only until one is pickable.
     local issues_tmp
     issues_tmp=$(mktemp)
-    _curl "$BASE/projects/$pid/issues/?per_page=500&page=1" > "$issues_tmp"
+    _all_issues "$pid" "id,sequence_id,state,labels,priority" > "$issues_tmp"
 
     # Filter to todo states + optional label, sort by priority
     local priority_order='{"urgent":0,"high":1,"medium":2,"low":3,"none":4}'
-    local candidates
-    candidates=$(jq -c --argjson order "$priority_order" --arg ids "$todo_ids" --arg lbl "$label_id" '
+    local candidate_ids
+    candidate_ids=$(jq -r --argjson order "$priority_order" --arg ids "$todo_ids" --arg lbl "$label_id" '
         .results |
         map(
             select(.state as $s | ($ids | split(",")) | index($s) != null) |
             if $lbl != "" then select(.labels | index($lbl) != null) else . end
         ) |
-        sort_by($order[.priority] // 5)
+        sort_by($order[.priority] // 5) |
+        .[].id
     ' "$issues_tmp")
 
-    # Blocking-relationship gate: Plane's v1 API does not expose issue-relations
-    # (blocked_by/blocking) at all, so this approximates it via a text convention —
-    # "Blocked by: #<sequence_id>" in description_html — instead of a real relations
-    # API call. Opt in with PLANE_RESPECT_BLOCKERS=1. By default a reference resolves
-    # only once the blocker reaches a completed/cancelled state (i.e. Done); appending
-    # "(review)" — e.g. "Blocked by: #<sequence_id> (review)" — loosens that single
-    # reference to resolve as soon as the blocker reaches a state whose name contains
-    # "review" (Done also satisfies it, since Done implies past review). A referenced
-    # sequence_id that can't be found among the currently-fetched issues fails open
-    # (not blocking), since it's more likely a stale/typo'd reference than an
-    # intentional gate.
-    local next
-    if [ "${PLANE_RESPECT_BLOCKERS:-0}" = "1" ]; then
-        local resolved_ids
-        resolved_ids=$(echo "$states" | jq -c '[.results[] | select(.group == "completed" or .group == "cancelled") | .id]')
-
-        local resolved_review_ids
-        resolved_review_ids=$(echo "$states" | jq -c '[.results[] | select(.group == "completed" or .group == "cancelled" or (.name | test("review"; "i"))) | .id]')
-
-        local seq_to_state
-        seq_to_state=$(jq -c '[.results[] | {(.sequence_id | tostring): .state}] | add // {}' "$issues_tmp")
-
-        next=$(printf '%s' "$candidates" | jq -c --argjson resolved "$resolved_ids" --argjson resolved_review "$resolved_review_ids" --argjson seqmap "$seq_to_state" '
-            def blocked_refs:
-                (.description_html // "") |
-                [scan("(?i)blocked[- ]by:?\\s*#?([0-9]+)(?:\\s*\\(?(review)\\)?)?")] |
-                map({id: (.[0] | tonumber), review: (.[1] != null)});
-            first(.[] | select(
-                (blocked_refs | map(. + {state: $seqmap[.id | tostring]}) | map(select(.state != null))) as $blockers |
-                ($blockers | all(
-                    . as $b | (if $b.review then $resolved_review else $resolved end) | index($b.state) != null
-                ))
-            ))
-        ')
-    else
-        next=$(printf '%s' "$candidates" | jq 'first')
-    fi
-    rm -f "$issues_tmp"
-
-    if [ -z "$next" ] || [ "$next" = "null" ]; then
-        if [ "$(echo "$candidates" | jq 'length')" -gt 0 ]; then
-            echo '{"done": true, "message": "all candidate tasks are blocked by unresolved dependencies"}'
-        else
-            echo '{"done": true, "message": "no tasks in todo states"}'
-        fi
+    if [ -z "$candidate_ids" ]; then
+        rm -f "$issues_tmp"
+        echo '{"done": true, "message": "no tasks in todo states"}'
         exit 0
     fi
 
-    # Fetch comments and include them in the response (description stays as description_html)
-    local issue_id
-    issue_id=$(echo "$next" | jq -r '.id')
-    local comments
-    comments=$(_curl "$BASE/projects/$pid/issues/$issue_id/comments/" \
-        | jq '[.results[] | {
-            id,
-            body: (.comment_html // "" | gsub("<[^>]*>"; "") | gsub("^\\s+|\\s+$"; "")),
-            images: [(.comment_html // "") | scan("<(?:image-component|img)[^>]*\\bsrc=\"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\"") | .[0]],
-            created_at
-        }] | sort_by(.created_at)')
+    if [ "${PLANE_RESPECT_BLOCKERS:-0}" != "1" ]; then
+        rm -f "$issues_tmp"
+        _issue_with_comments "$pid" "$(printf '%s' "$candidate_ids" | head -1)"
+        return
+    fi
 
-    echo "$next" | jq \
-        --argjson comments "$comments" \
-        ". + {comments: \$comments} | $_STRIP_NOISE"
+    local resolved_ids resolved_review_ids seq_to_state
+    resolved_ids=$(echo "$states" | jq -c '[.results[] | select(.group == "completed" or .group == "cancelled") | .id]')
+    resolved_review_ids=$(echo "$states" | jq -c '[.results[] | select(.group == "completed" or .group == "cancelled" or (.name | test("review"; "i"))) | .id]')
+    seq_to_state=$(jq -c '[.results[] | {(.sequence_id | tostring): .state}] | add // {}' "$issues_tmp")
+    rm -f "$issues_tmp"
+
+    # Walk candidates highest-priority-first, reading each one's description
+    # only until an unblocked one is found — the winner's description is needed
+    # for the response anyway, so nothing is fetched twice.
+    local id desc blocked
+    while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        desc=$(_get_desc "$pid" "$id")
+        blocked=$(jq -n --arg desc "$desc" --argjson seqmap "$seq_to_state" \
+            --argjson resolved "$resolved_ids" --argjson resolved_review "$resolved_review_ids" \
+            "$_BLOCKER_JQ | .blocked")
+        if [ "$blocked" != "true" ]; then
+            _issue_with_comments "$pid" "$id"
+            return
+        fi
+    done <<< "$candidate_ids"
+
+    echo '{"done": true, "message": "all candidate tasks are blocked by unresolved dependencies"}'
+    exit 0
+}
+
+# Todo tasks held back by an unresolved "Blocked by: #<seq>" reference, with
+# each blocker's sequence_id, state and whether it is a "(review)" gate. This
+# is the read-only counterpart to next-task's blocker gate: when next-task says
+# "all candidate tasks are blocked by unresolved dependencies", this says which
+# tasks and what they are waiting on. Unlike next-task it always evaluates
+# blockers, whatever PLANE_RESPECT_BLOCKERS is set to.
+cmd_list_blocked() {
+    local pid
+    pid=$(_project_id)
+
+    local states
+    states=$(_states "$pid")
+
+    local todo_ids
+    todo_ids=$(_todo_state_ids "$states")
+    if [ -z "$todo_ids" ]; then
+        echo '{"error": "no todo states found"}' >&2
+        exit 1
+    fi
+
+    local label_id
+    label_id=$(_required_label_id "$pid")
+
+    local issues_tmp
+    issues_tmp=$(mktemp)
+    _all_issues "$pid" "id,sequence_id,name,state,labels,priority" > "$issues_tmp"
+
+    local resolved_ids resolved_review_ids seq_to_state seq_to_name state_names
+    resolved_ids=$(echo "$states" | jq -c '[.results[] | select(.group == "completed" or .group == "cancelled") | .id]')
+    resolved_review_ids=$(echo "$states" | jq -c '[.results[] | select(.group == "completed" or .group == "cancelled" or (.name | test("review"; "i"))) | .id]')
+    seq_to_state=$(jq -c '[.results[] | {(.sequence_id | tostring): .state}] | add // {}' "$issues_tmp")
+    seq_to_name=$(jq -c '[.results[] | {(.sequence_id | tostring): .name}] | add // {}' "$issues_tmp")
+    state_names=$(echo "$states" | jq -c '[.results[] | {(.id): .name}] | add // {}')
+
+    local candidates
+    candidates=$(jq -c --arg ids "$todo_ids" --arg lbl "$label_id" '
+        .results |
+        map(
+            select(.state as $s | ($ids | split(",")) | index($s) != null) |
+            if $lbl != "" then select(.labels | index($lbl) != null) else . end
+        ) |
+        map({id, sequence_id, name, priority})
+    ' "$issues_tmp")
+    rm -f "$issues_tmp"
+
+    local out="[]" id seq name priority desc verdict entry
+    while IFS=$'\t' read -r id seq name priority; do
+        [ -n "$id" ] || continue
+        desc=$(_get_desc "$pid" "$id")
+        verdict=$(jq -n --arg desc "$desc" --argjson seqmap "$seq_to_state" \
+            --argjson resolved "$resolved_ids" --argjson resolved_review "$resolved_review_ids" \
+            "$_BLOCKER_JQ")
+        [ "$(printf '%s' "$verdict" | jq -r '.blocked')" = "true" ] || continue
+        entry=$(jq -n --arg id "$id" --argjson seq "$seq" --arg name "$name" --arg priority "$priority" \
+            --argjson verdict "$verdict" --argjson names "$seq_to_name" --argjson snames "$state_names" '
+            {
+                id: $id, sequence_id: $seq, name: $name, priority: $priority,
+                blocked_by: ($verdict.blockers | map({
+                    sequence_id: .id,
+                    name: ($names[.id | tostring] // null),
+                    state: ($snames[.state] // .state),
+                    gate: (if .review then "review" else "done" end),
+                    resolved: .resolved
+                }))
+            }')
+        out=$(jq -c -n --argjson acc "$out" --argjson e "$entry" '$acc + [$e]')
+    done < <(printf '%s' "$candidates" | jq -r '.[] | [.id, .sequence_id, .name, .priority] | @tsv')
+
+    printf '%s\n' "$out" | jq '.'
 }
 
 cmd_set_in_progress() {
@@ -546,20 +701,37 @@ cmd_list_review() {
         label_id=$(_label_id_by_name "$pid" "$PLANE_LABEL")
     fi
 
+    # Lean bulk read, then one description fetch per Review task. Review is a
+    # small set (single digits in practice) while the whole board is >1000
+    # issues, so pulling description_html for every issue just to read a
+    # handful of them was what made this call multi-megabyte — and
+    # ralph-plane.sh runs it once per iteration in sweep_failed_tests.
     local issues_tmp
     issues_tmp=$(mktemp)
-    _curl "$BASE/projects/$pid/issues/?per_page=500&page=1" > "$issues_tmp"
+    _all_issues "$pid" "id,sequence_id,name,state,labels" > "$issues_tmp"
 
-    jq --arg state "$state_id" --arg lbl "$label_id" '
+    local rows
+    rows=$(jq -r --arg state "$state_id" --arg lbl "$label_id" '
         .results |
         map(
             select(.state == $state) |
             if $lbl != "" then select(.labels | index($lbl) != null) else . end
         ) |
         sort_by(.sequence_id) |
-        map({id, sequence_id, name, description_html})
-    ' "$issues_tmp"
+        .[] | [.id, .sequence_id, .name] | @tsv
+    ' "$issues_tmp")
     rm -f "$issues_tmp"
+
+    local out="[]" id seq name desc
+    while IFS=$'\t' read -r id seq name; do
+        [ -n "$id" ] || continue
+        desc=$(_get_desc "$pid" "$id")
+        out=$(jq -c -n --argjson acc "$out" --arg id "$id" --argjson seq "$seq" \
+            --arg name "$name" --arg desc "$desc" \
+            '$acc + [{id: $id, sequence_id: $seq, name: $name, description_html: $desc}]')
+    done <<< "$rows"
+
+    printf '%s\n' "$out" | jq '.'
 }
 
 # Append the branch tag to the description AND post it as a comment.
@@ -656,57 +828,6 @@ cmd_prepend_description() {
     jq -n --arg id "$issue_id" '{id: $id, ok: true}'
 }
 
-cmd_done_in_period() {
-    local from_date="${1:?from_date required (YYYY-MM-DD or ISO datetime)}"
-    local to_date="${2:-}"
-    local pid
-    pid=$(_project_id)
-
-    local states
-    states=$(_states "$pid")
-
-    # Find the "Done" state (completed group, name contains "done")
-    local done_state_id
-    done_state_id=$(echo "$states" | jq -r '
-        .results[] |
-        select(.group == "completed" and (.name | ascii_downcase | contains("done"))) |
-        .id
-    ' | head -1)
-
-    if [ -z "$done_state_id" ]; then
-        echo "ERROR: no Done state found in completed group" >&2
-        exit 1
-    fi
-
-    # Normalize from_date to ISO datetime
-    if [[ "$from_date" != *T* ]]; then
-        from_date="${from_date}T00:00:00Z"
-    fi
-
-    # Normalize to_date (default: end of today)
-    if [ -z "$to_date" ]; then
-        to_date=$(date -u +"%Y-%m-%dT23:59:59Z")
-    elif [[ "$to_date" != *T* ]]; then
-        to_date="${to_date}T23:59:59Z"
-    fi
-
-    local issues_tmp
-    issues_tmp=$(mktemp)
-    _curl "$BASE/projects/$pid/issues/?per_page=500&page=1" > "$issues_tmp"
-
-    jq --arg state "$done_state_id" --arg from "$from_date" --arg to "$to_date" '
-        .results |
-        map(
-            select(.state == $state) |
-            select(.updated_at >= $from and .updated_at <= $to)
-        ) |
-        sort_by(.updated_at) |
-        map({id, sequence_id, name, priority, updated_at})
-    ' "$issues_tmp"
-
-    rm -f "$issues_tmp"
-}
-
 cmd_task_in_progress() {
     local pid
     pid=$(_project_id)
@@ -727,7 +848,7 @@ cmd_task_in_progress() {
 
     local issues_tmp
     issues_tmp=$(mktemp)
-    _curl "$BASE/projects/$pid/issues/?per_page=500&page=1" > "$issues_tmp"
+    _all_issues "$pid" "id,sequence_id,state,labels,updated_at" > "$issues_tmp"
 
     local next
     next=$(jq --arg state "$state_id" --arg lbl "$label_id" '
@@ -746,20 +867,10 @@ cmd_task_in_progress() {
         exit 0
     fi
 
-    local issue_id
-    issue_id=$(echo "$next" | jq -r '.id')
-    local comments
-    comments=$(_curl "$BASE/projects/$pid/issues/$issue_id/comments/" \
-        | jq '[.results[] | {
-            id,
-            body: (.comment_html // "" | gsub("<[^>]*>"; "") | gsub("^\\s+|\\s+$"; "")),
-            images: [(.comment_html // "") | scan("<(?:image-component|img)[^>]*\\bsrc=\"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\"") | .[0]],
-            created_at
-        }] | sort_by(.created_at)')
-
-    echo "$next" | jq \
-        --argjson comments "$comments" \
-        ". + {comments: \$comments} | $_STRIP_NOISE"
+    # The bulk read above uses a lean fields= projection (no description_html,
+    # no name), so the full issue is re-read by id here rather than returned
+    # straight from the dump.
+    _issue_with_comments "$pid" "$(echo "$next" | jq -r '.id')"
 }
 
 cmd_done_in_period() {
@@ -797,7 +908,7 @@ cmd_done_in_period() {
 
     local issues_tmp
     issues_tmp=$(mktemp)
-    _curl "$BASE/projects/$pid/issues/?per_page=500&page=1" > "$issues_tmp"
+    _all_issues "$pid" "id,sequence_id,name,priority,state,updated_at" > "$issues_tmp"
 
     jq --arg state "$done_state_id" --arg from "$from_date" --arg to "$to_date" '
         .results |
@@ -873,7 +984,7 @@ cmd_review_done_in_period() {
 
     local issues_tmp
     issues_tmp=$(mktemp)
-    _curl "$BASE/projects/$pid/issues/?per_page=500&page=1" > "$issues_tmp"
+    _all_issues "$pid" "id,sequence_id,name,state,updated_at" > "$issues_tmp"
 
     jq -r --arg done "$done_state_id" --arg review "$review_state_id" --arg cancelled "$cancelled_state_id" \
        --arg from "$from_date" --arg to "$to_date" '
@@ -1347,6 +1458,7 @@ case "$CMD" in
     set-todo)            cmd_set_todo "${1:?issue_id required}" ;;
     set-label)            cmd_set_label "${1:?issue_id required}" "${2:?label required}" ;;
     list-review)         cmd_list_review ;;
+    list-blocked)        cmd_list_blocked ;;
     set-done)            cmd_set_done "${1:?issue_id required}" ;;
     set-cancelled)       cmd_set_cancelled "${1:?issue_id required}" ;;
     set-branch)          cmd_set_branch "${1:?issue_id required}" "${2:?branch required}" ;;
@@ -1380,7 +1492,7 @@ case "$CMD" in
     list-images)      cmd_list_images "${1:?issue_id required}" ;;
     *)
         echo "Usage: $0 <command> [args]"
-        echo "Commands: next-task | task-in-progress | set-in-progress <id> | set-review <id> | set-todo <id> | set-label <id> <label> | list-review | set-done <id> | set-cancelled <id> | set-branch <id> <branch> | set-pr <id> <pr_url> | add-comment <id> <html> | get-comments <id> | update-description <id> | append-description <id> | prepend-description <id> | create-task <name> [desc] [priority] [backlog|todo] [label] [link_from_id] | task-url <id> | create-page <name> [desc_html|@file] | main-page [page_name] [env_key] | page-url <id> | get-page <id> [out_file] | edit-page <id> [name] [desc_html|@file] | rename-page <id> <name> | remove-page <id> | archive-page <id> | unarchive-page <id> | search-pages <query> | done-in-period <from> [<to>] | review-done-in-period <from> [<to>] | get-issue <id> | get-task <ref, e.g. TM-808> | list-states | list-labels | list-projects | upload-asset <file> <issue_id> [project_id] | download-asset <asset_id> <out_path> <issue_id> [project_id] | list-images <issue_id>"
+        echo "Commands: next-task | task-in-progress | set-in-progress <id> | set-review <id> | set-todo <id> | set-label <id> <label> | list-review | list-blocked | set-done <id> | set-cancelled <id> | set-branch <id> <branch> | set-pr <id> <pr_url> | add-comment <id> <html> | get-comments <id> | update-description <id> | append-description <id> | prepend-description <id> | create-task <name> [desc] [priority] [backlog|todo] [label] [link_from_id] | task-url <id> | create-page <name> [desc_html|@file] | main-page [page_name] [env_key] | page-url <id> | get-page <id> [out_file] | edit-page <id> [name] [desc_html|@file] | rename-page <id> <name> | remove-page <id> | archive-page <id> | unarchive-page <id> | search-pages <query> | done-in-period <from> [<to>] | review-done-in-period <from> [<to>] | get-issue <id> | get-task <ref, e.g. TM-808> | list-states | list-labels | list-projects | upload-asset <file> <issue_id> [project_id] | download-asset <asset_id> <out_path> <issue_id> [project_id] | list-images <issue_id>"
         exit 1
         ;;
 esac
