@@ -122,6 +122,25 @@ trap '[ -n "$WATCHER_PID" ] && kill "$WATCHER_PID" 2>/dev/null; rm -f "$STATE_FI
 _is_json() { printf '%s' "$1" | jq -e . >/dev/null 2>&1; }
 _task_id_of() { printf '%s' "$1" | jq -r '.id // ""' 2>/dev/null || echo ""; }
 
+# Strip a "Resume-Session: <uuid>" marker (see the rate-limit handling in the
+# main loop below) from a task's CURRENT description — re-fetched fresh here
+# rather than reusing the in-memory TASK_JSON, since the agent may have
+# appended its own checklist/investigation notes to the description during
+# the iteration this marker is being cleared after. sed substitution (not
+# grep -v line filtering) because description_html from Plane is not
+# reliably newline-delimited — it can arrive as one long line — so removing
+# "the line containing it" could just as easily remove the entire
+# description as remove nothing.
+_clear_resume_marker() {
+    local id="$1" desc
+    desc=$("$RALPH_DIR/plane.sh" get-issue "$id" 2>/dev/null | jq -r '.description_html // ""')
+    [ -z "$desc" ] && return 0
+    if printf '%s' "$desc" | grep -q 'Resume-Session:'; then
+        printf '%s' "$desc" | sed -E 's#<p>Resume-Session:[^<]*</p>##g' \
+            | "$RALPH_DIR/plane.sh" update-description "$id" >/dev/null 2>&1 || true
+    fi
+}
+
 # Optional per-project daily iteration cap (RALPH_MAX_ITERATIONS_PER_DAY).
 # Persisted outside the process (this loop runs forever, but the counter must
 # survive a restart within the same day) as "<local-date>:<count>" so a new
@@ -494,6 +513,14 @@ while true; do
 
     # Pre-iteration gate: wait until a task exists AND Claude API limits are acceptable
     while true; do
+        # Re-read .env on every retry, not just once per outer iteration
+        # above: a project stuck here specifically because usage is over
+        # threshold would otherwise never see a live-edited RALPH_MAX_LIMIT_PCT
+        # (e.g. via Telegram's /maxlimit) until it happened to break out of this
+        # loop on its own — exactly the case an operator raising the threshold
+        # live is trying to unstick immediately. Cheap: local file parse, no
+        # network call.
+        load_env
         printf "\033[90m[%s] Checking tasks...\033[0m" "$(date +%H:%M:%S)"
 
         # Check for an interrupted in-progress task first (resume after restart)
@@ -659,6 +686,22 @@ while true; do
         esac
     fi
 
+    # Session-limit resume: a task's description may contain
+    # "Resume-Session: <uuid>", written by this script itself (see the
+    # rate-limit handling after the claude call below) when a previous
+    # iteration was cut short by the Claude subscription's usage limit before
+    # it could signal TASK_DONE/TASK_BLOCKED. When present, this iteration
+    # runs `claude --resume <uuid>` instead of a fresh session, so the model
+    # picks up its own prior reasoning/progress instead of starting cold —
+    # mutually exclusive in practice with ITER_RESUME (task-in-progress crash
+    # recovery) above, since a rate-limited task is moved to Todo, not left
+    # In Progress.
+    ITER_RESUME_SESSION_ID=$(echo "$TASK_JSON" | jq -r '.description_html // ""' \
+        | grep -ioP '(?<=resume-session:)[[:space:]]*\K[0-9a-f-]{36}' | tail -1 || echo "")
+    if [ -n "$ITER_RESUME_SESSION_ID" ]; then
+        echo -e "\033[90m  resuming Claude session: ${ITER_RESUME_SESSION_ID}\033[0m"
+    fi
+
     # Inject the task JSON directly so Claude already has it and does not fetch it.
     {
         echo ""
@@ -666,7 +709,9 @@ while true; do
         echo ""
         echo "## Your task"
         echo ""
-        if [ "$ITER_RESUME" = true ]; then
+        if [ -n "$ITER_RESUME_SESSION_ID" ]; then
+            echo "NOTE: Your previous Claude session for this task hit the subscription's usage limit and was cut short mid-work. You are being resumed in that exact same session — your prior reasoning and progress are already in context. Do not restart or re-investigate from scratch; continue exactly where you left off."
+        elif [ "$ITER_RESUME" = true ]; then
             echo "NOTE: This task was already In Progress from a previous session — resume where it left off."
         else
             echo "NOTE: This task has already been moved to In Progress for you."
@@ -718,12 +763,16 @@ while true; do
     state_watcher "$RAWFILE" &
     WATCHER_PID=$!
 
+    CLAUDE_ARGS=(--model "$ITER_MODEL" --effort "$ITER_EFFORT")
+    [ -n "$ITER_RESUME_SESSION_ID" ] && CLAUDE_ARGS+=(--resume "$ITER_RESUME_SESSION_ID")
+    CLAUDE_ARGS+=(--print --verbose --dangerously-skip-permissions --output-format stream-json)
+
     while IFS= read -r line; do
         if [ -n "$line" ]; then
             printf "\033[90m[%s]\033[0m %s\n" "$(date +%H:%M:%S)" "$line"
             echo "$line" >> "$TMPFILE"
         fi
-    done < <(cat "$PROMPT_INPUT" | claude --model "$ITER_MODEL" --effort "$ITER_EFFORT" --print --verbose --dangerously-skip-permissions --output-format stream-json 2>/dev/null \
+    done < <(cat "$PROMPT_INPUT" | claude "${CLAUDE_ARGS[@]}" 2>/dev/null \
         | tee "$RAWFILE" \
         | grep --line-buffered '^{' \
         | jq --unbuffered -r '
@@ -791,6 +840,10 @@ while true; do
     echo ""
 
     RESULT_JSON=$(grep '^{' "$RAWFILE" | jq -c 'select(.type == "result")' 2>/dev/null | tail -1 || echo "{}")
+    # This run's own Claude session_id (present on every stream-json event,
+    # not just "result") — captured unconditionally so the rate-limit
+    # handling below can persist it if this run itself gets cut short.
+    RUN_SESSION_ID=$(grep '^{' "$RAWFILE" 2>/dev/null | jq -r 'select(.session_id != null) | .session_id' 2>/dev/null | tail -1 || echo "")
     ITER_IN=$(echo "$RESULT_JSON" | jq -r '.usage.input_tokens // 0' || echo "0")
     ITER_CACHE_CREATE=$(echo "$RESULT_JSON" | jq -r '.usage.cache_creation_input_tokens // 0' || echo "0")
     ITER_CACHE_READ=$(echo "$RESULT_JSON" | jq -r '.usage.cache_read_input_tokens // 0' || echo "0")
@@ -884,10 +937,41 @@ while true; do
     if grep -q '<promise>TASK_BLOCKED</promise>' "$TMPFILE"; then
         TASK_BLOCKED=true
     fi
+    TASK_DONE_SIGNAL=false
+    if grep -q '<promise>TASK_DONE</promise>' "$TMPFILE"; then
+        TASK_DONE_SIGNAL=true
+    fi
+
+    # Session-limit failure: neither promise fired, and the raw stream shows
+    # the API rejecting a request on rate-limit grounds — the subscription's
+    # usage limit was hit mid-iteration, not caught by the pre-iteration
+    # check_claude_limits gate above (which only checks before an iteration
+    # starts). Treated like TASK_BLOCKED (→ Todo, not Review) rather than the
+    # "no signal" fallback below, but additionally persists RUN_SESSION_ID so
+    # the next pickup resumes this exact Claude session (see
+    # ITER_RESUME_SESSION_ID/--resume above) instead of restarting cold.
+    RATE_LIMITED=false
+    if [ "$TASK_BLOCKED" = false ] && [ "$TASK_DONE_SIGNAL" = false ]; then
+        if grep '^{' "$RAWFILE" 2>/dev/null | jq -e '
+            select(.type == "rate_limit_event") | (.rate_limit_info.status // "") | test("reject"; "i")
+        ' >/dev/null 2>&1; then
+            RATE_LIMITED=true
+        fi
+    fi
 
     if [ -n "$TASK_ID" ]; then
+        # This run itself was resuming a previously rate-limited session —
+        # clear that marker now regardless of this run's own outcome (done,
+        # blocked, or rate-limited again). A fresh marker is appended below
+        # if this run also ends up rate-limited.
+        if [ -n "$ITER_RESUME_SESSION_ID" ]; then
+            _clear_resume_marker "$TASK_ID"
+        fi
+
         NEXT_STATE_LABEL="Review"
-        [ "$TASK_BLOCKED" = true ] && NEXT_STATE_LABEL="Todo"
+        if [ "$TASK_BLOCKED" = true ] || [ "$RATE_LIMITED" = true ]; then
+            NEXT_STATE_LABEL="Todo"
+        fi
         printf "\033[90m[%s] Finishing task %s (→ %s)...\033[0m" "$(date +%H:%M:%S)" "$TASK_ID" "$NEXT_STATE_LABEL"
         # Upload this iteration's logs (ANSI-stripped) to a SECRET GitHub gist.
         LOG_TXT=$(mktemp)
@@ -909,8 +993,16 @@ while true; do
         if [ -n "$GIST_URL" ]; then
             ITER_COMMENT="${ITER_COMMENT}<p>Ralph logs (secret gist): <a href=\"${GIST_URL}\">${GIST_URL}</a></p>"
         fi
+        if [ "$RATE_LIMITED" = true ]; then
+            if [ -n "$RUN_SESSION_ID" ]; then
+                printf '<p>Resume-Session: %s</p>' "$RUN_SESSION_ID" | "$RALPH_DIR/plane.sh" append-description "$TASK_ID" >/dev/null 2>&1 || true
+                ITER_COMMENT="${ITER_COMMENT}<p>⏱ Hit the Claude usage limit mid-iteration — moved back to Todo; the next pickup will resume this exact Claude session (<code>${RUN_SESSION_ID}</code>) instead of starting cold.</p>"
+            else
+                ITER_COMMENT="${ITER_COMMENT}<p>⏱ Hit the Claude usage limit mid-iteration — moved back to Todo. No session id was captured to resume from, so the next pickup starts a fresh session.</p>"
+            fi
+        fi
         "$RALPH_DIR/plane.sh" add-comment "$TASK_ID" "$ITER_COMMENT" 2>/dev/null || true
-        if [ "$TASK_BLOCKED" = true ]; then
+        if [ "$TASK_BLOCKED" = true ] || [ "$RATE_LIMITED" = true ]; then
             "$RALPH_DIR/plane.sh" set-todo "$TASK_ID" 2>/dev/null || true
         else
             "$RALPH_DIR/plane.sh" set-review "$TASK_ID" 2>/dev/null || true
@@ -923,7 +1015,8 @@ while true; do
     cleanup_docker_containers
 
     # Count this iteration toward RALPH_MAX_ITERATIONS_PER_DAY regardless of
-    # outcome (blocked/done/no-signal) — one claude call = one iteration.
+    # outcome (blocked/done/rate-limited/no-signal) — one claude call = one
+    # iteration.
     _increment_daily_iteration_count
 
     if [ "$TASK_BLOCKED" = true ]; then
@@ -933,16 +1026,23 @@ while true; do
         echo ""
         continue
     fi
-    if grep -q '<promise>TASK_DONE</promise>' "$TMPFILE"; then
+    if [ "$RATE_LIMITED" = true ]; then
         rm -f "$TMPFILE"
         echo ""
-        echo -e "\033[90m[$(date +%H:%M:%S)]\033[0m \033[1;33m── Task ${TASK_ID} done. Starting fresh session (iteration $ITERATION) ──\033[0m"
+        echo -e "\033[90m[$(date +%H:%M:%S)]\033[0m \033[1;33m── Task ${TASK_ID} hit the usage limit — moved back to Todo${RUN_SESSION_ID:+, will resume session ${RUN_SESSION_ID}}. Starting fresh session (iteration $ITERATION) ──\033[0m"
+        echo ""
+        continue
+    fi
+    if [ "$TASK_DONE_SIGNAL" = true ]; then
+        rm -f "$TMPFILE"
+        echo ""
+        echo -e "\033[90m[$(date +%H:%M:%S)]\033[0m \033[1;33m── Task ${TASK_ID} done. Starting fresh session (iteration $ITERATION) ──\033[0m"
         echo ""
         continue
     fi
     rm -f "$TMPFILE"
     echo ""
-    echo -e "\033[90m[$(date +%H:%M:%S)]\033[0m \033[1;31m── Iteration $ITERATION finished — task ${TASK_ID} (no signal) ──\033[0m"
+    echo -e "\033[90m[$(date +%H:%M:%S)]\033[0m \033[1;31m── Iteration $ITERATION finished — task ${TASK_ID} (no signal) ──\033[0m"
     echo ""
 done
 

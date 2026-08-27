@@ -7,8 +7,9 @@
 #   docs/plane.sh set-review <id>                        — move issue to "Review" state (automation-internal)
 #   docs/plane.sh set-todo <id>                          — move issue back to "Todo" state (automation-internal)
 #   docs/plane.sh set-label <id> <label>                  — replace an issue's labels with a single label (name or UUID) — e.g. to fix a task routed to the wrong sibling project
+#   docs/plane.sh set-priority <id> <priority>            — change an existing issue's priority (urgent|high|medium|low|none) — e.g. an operator bumping a task via Telegram's /setpriority
 #   docs/plane.sh list-review                            — Review-state tasks [{id,sequence_id,name,description_html}]
-#   docs/plane.sh list-blocked                           — Todo tasks held back by an unresolved "Blocked by: #<seq>" reference, with each blocker's sequence_id/name/state and whether it is a plain (Done) or "(review)" gate. The read-only counterpart to next-task's blocker gate; evaluates blockers regardless of PLANE_RESPECT_BLOCKERS
+#   docs/plane.sh list-blocked                           — Todo tasks held back by an unresolved "Blocked by: #<seq>" reference, with each blocker's sequence_id/name/state/url and whether it is a plain (Done) or "(review)" gate; each blocked task also carries its own url. The read-only counterpart to next-task's blocker gate; evaluates blockers regardless of PLANE_RESPECT_BLOCKERS
 #   docs/plane.sh add-comment <id> <html>                — post a comment on an issue (body must be HTML)
 #   docs/plane.sh get-comments <id>                      — list all comments on an issue as JSON
 #   docs/plane.sh update-description <id>                — replace description_html (reads new HTML from stdin)
@@ -17,7 +18,7 @@
 #   docs/plane.sh set-branch <id> <branch>              — append branch tag to description AND post a comment
 #   docs/plane.sh set-pr <id> <pr_url>                  — append PR link to description AND post a comment
 #   docs/plane.sh task-in-progress                      — in-progress task (filtered by PLANE_LABEL); {"done":true} if none
-#   docs/plane.sh create-task <name> [desc] [priority] [backlog|todo] [label] [link_from_id]  — create new issue; priority must be one of urgent, high, medium, low, none (default none) — any other value is rejected loudly; with link_from_id, appends a link to the new task onto that task's description
+#   docs/plane.sh create-task <name> [desc] [priority] [backlog|todo|pre-ai] [label] [link_from_id]  — create new issue; priority must be one of urgent, high, medium, low, none (default none) — any other value is rejected loudly; with link_from_id, appends a link to the new task onto that task's description; pre-ai targets a "Todo (pre-AI)"-style state for a task that needs operator triage before an agent should pick it up
 #   docs/plane.sh task-url <id>                          — print an issue's web-app URL (for linking it from a comment/description)
 #   docs/plane.sh create-page <name> [desc_html|@file]   — create new project page (@file reads desc from a file)
 #   docs/plane.sh main-page [page_name] [env_key]         — get a root doc page by env_key (default PLANE_MAIN_DOC_PAGE_ID), creating it (named page_name) if it does not exist yet; response includes just_created: true/false. Pass a distinct env_key to track more than one root (e.g. separate dev/user doc hierarchies).
@@ -556,12 +557,16 @@ cmd_list_blocked() {
     issues_tmp=$(mktemp)
     _all_issues "$pid" "id,sequence_id,name,state,labels,priority" > "$issues_tmp"
 
-    local resolved_ids resolved_review_ids seq_to_state seq_to_name state_names
+    local resolved_ids resolved_review_ids seq_to_state seq_to_name seq_to_id state_names url_prefix
     resolved_ids=$(echo "$states" | jq -c '[.results[] | select(.group == "completed" or .group == "cancelled") | .id]')
     resolved_review_ids=$(echo "$states" | jq -c '[.results[] | select(.group == "completed" or .group == "cancelled" or (.name | test("review"; "i"))) | .id]')
     seq_to_state=$(jq -c '[.results[] | {(.sequence_id | tostring): .state}] | add // {}' "$issues_tmp")
     seq_to_name=$(jq -c '[.results[] | {(.sequence_id | tostring): .name}] | add // {}' "$issues_tmp")
+    seq_to_id=$(jq -c '[.results[] | {(.sequence_id | tostring): .id}] | add // {}' "$issues_tmp")
     state_names=$(echo "$states" | jq -c '[.results[] | {(.id): .name}] | add // {}')
+    # Same shape as cmd_task_url, built inline so every entry/blocker below
+    # can carry a ready-to-click link without a per-row task-url call.
+    url_prefix="https://$PLANE_HOST/$PLANE_USERNAME/projects/$pid/issues/"
 
     local candidates
     candidates=$(jq -c --arg ids "$todo_ids" --arg lbl "$label_id" '
@@ -583,16 +588,22 @@ cmd_list_blocked() {
             "$_BLOCKER_JQ")
         [ "$(printf '%s' "$verdict" | jq -r '.blocked')" = "true" ] || continue
         entry=$(jq -n --arg id "$id" --argjson seq "$seq" --arg name "$name" --arg priority "$priority" \
-            --argjson verdict "$verdict" --argjson names "$seq_to_name" --argjson snames "$state_names" '
+            --arg urlprefix "$url_prefix" \
+            --argjson verdict "$verdict" --argjson names "$seq_to_name" --argjson snames "$state_names" --argjson ids "$seq_to_id" '
             {
                 id: $id, sequence_id: $seq, name: $name, priority: $priority,
-                blocked_by: ($verdict.blockers | map({
-                    sequence_id: .id,
-                    name: ($names[.id | tostring] // null),
-                    state: ($snames[.state] // .state),
-                    gate: (if .review then "review" else "done" end),
-                    resolved: .resolved
-                }))
+                url: ($urlprefix + $id + "/"),
+                blocked_by: ($verdict.blockers | map(
+                    (.id | tostring) as $bseq |
+                    {
+                        sequence_id: .id,
+                        name: ($names[$bseq] // null),
+                        state: ($snames[.state] // .state),
+                        gate: (if .review then "review" else "done" end),
+                        resolved: .resolved,
+                        url: (if $ids[$bseq] then ($urlprefix + $ids[$bseq] + "/") else null end)
+                    }
+                ))
             }')
         out=$(jq -c -n --argjson acc "$out" --argjson e "$entry" '$acc + [$e]')
     done < <(printf '%s' "$candidates" | jq -r '.[] | [.id, .sequence_id, .name, .priority] | @tsv')
@@ -672,6 +683,27 @@ cmd_set_label() {
 
     _curl -X PATCH -d "{\"labels\": [\"$label_id\"]}" \
         "$BASE/projects/$pid/issues/$issue_id/" | jq '{id, labels, name}'
+}
+
+# Change an existing issue's priority after the fact — e.g. an operator
+# triaging via Telegram's /setpriority bumping a task ahead of the queue.
+# Same priority vocabulary/rejection as create-task's 3rd arg.
+cmd_set_priority() {
+    local issue_id="${1:?issue_id required}"
+    local priority="${2:?priority required}"
+    local pid
+    pid=$(_project_id)
+
+    case "${priority,,}" in
+        urgent|high|medium|low|none) priority="${priority,,}" ;;
+        *)
+            echo "ERROR: unknown priority \"$priority\"; use one of urgent, high, medium, low, none" >&2
+            exit 1
+            ;;
+    esac
+
+    _curl -X PATCH -d "{\"priority\": \"$priority\"}" \
+        "$BASE/projects/$pid/issues/$issue_id/" | jq '{id, sequence_id, name, priority}'
 }
 
 # List tasks currently in the Review state (filtered by PLANE_LABEL).
@@ -1067,21 +1099,29 @@ cmd_create_task() {
             ;;
     esac
 
-    # Resolve state by name (backlog or todo). "todo" checks PLANE_STATE_TODO
-    # first, same as set-todo/next-task — without this, create-task fell back
-    # to a bare group+name-hint lookup even on a project where PLANE_STATE_TODO
-    # is already configured specifically because that project's states don't
-    # resolve reliably by name alone (e.g. more than one "unstarted" state
-    # whose name contains "todo").
+    # Resolve state by name (backlog, todo, or pre-ai). "todo" checks
+    # PLANE_STATE_TODO first, same as set-todo/next-task — without this,
+    # create-task fell back to a bare group+name-hint lookup even on a project
+    # where PLANE_STATE_TODO is already configured specifically because that
+    # project's states don't resolve reliably by name alone (e.g. more than
+    # one "unstarted" state whose name contains "todo"). "pre-ai" is the same
+    # idea for a project whose board has a distinct "Todo (pre-AI)"-style
+    # state for tasks that need operator triage before an agent picks them
+    # up — PLANE_STATE_PRE_AI_TODO is optional since the "pre-ai" name hint
+    # does not collide with "todo"'s substring-match ambiguity above.
     local state_id
     case "${state_name,,}" in
         todo)
             state_id="${PLANE_STATE_TODO:-}"
             [ -z "$state_id" ] && state_id=$(_state_id_by_group_or_name "$pid" "unstarted" "todo")
             ;;
+        pre-ai)
+            state_id="${PLANE_STATE_PRE_AI_TODO:-}"
+            [ -z "$state_id" ] && state_id=$(_state_id_by_group_or_name "$pid" "unstarted" "pre-ai")
+            ;;
         backlog) state_id=$(_state_id_by_group_or_name "$pid" "backlog" "backlog") ;;
         *)
-            echo "ERROR: unknown state \"$state_name\"; use backlog or todo" >&2
+            echo "ERROR: unknown state \"$state_name\"; use backlog, todo, or pre-ai" >&2
             exit 1
             ;;
     esac
@@ -1457,6 +1497,7 @@ case "$CMD" in
     set-review)          cmd_set_review "${1:?issue_id required}" ;;
     set-todo)            cmd_set_todo "${1:?issue_id required}" ;;
     set-label)            cmd_set_label "${1:?issue_id required}" "${2:?label required}" ;;
+    set-priority)         cmd_set_priority "${1:?issue_id required}" "${2:?priority required}" ;;
     list-review)         cmd_list_review ;;
     list-blocked)        cmd_list_blocked ;;
     set-done)            cmd_set_done "${1:?issue_id required}" ;;
@@ -1492,7 +1533,7 @@ case "$CMD" in
     list-images)      cmd_list_images "${1:?issue_id required}" ;;
     *)
         echo "Usage: $0 <command> [args]"
-        echo "Commands: next-task | task-in-progress | set-in-progress <id> | set-review <id> | set-todo <id> | set-label <id> <label> | list-review | list-blocked | set-done <id> | set-cancelled <id> | set-branch <id> <branch> | set-pr <id> <pr_url> | add-comment <id> <html> | get-comments <id> | update-description <id> | append-description <id> | prepend-description <id> | create-task <name> [desc] [priority] [backlog|todo] [label] [link_from_id] | task-url <id> | create-page <name> [desc_html|@file] | main-page [page_name] [env_key] | page-url <id> | get-page <id> [out_file] | edit-page <id> [name] [desc_html|@file] | rename-page <id> <name> | remove-page <id> | archive-page <id> | unarchive-page <id> | search-pages <query> | done-in-period <from> [<to>] | review-done-in-period <from> [<to>] | get-issue <id> | get-task <ref, e.g. TM-808> | list-states | list-labels | list-projects | upload-asset <file> <issue_id> [project_id] | download-asset <asset_id> <out_path> <issue_id> [project_id] | list-images <issue_id>"
+        echo "Commands: next-task | task-in-progress | set-in-progress <id> | set-review <id> | set-todo <id> | set-label <id> <label> | set-priority <id> <priority> | list-review | list-blocked | set-done <id> | set-cancelled <id> | set-branch <id> <branch> | set-pr <id> <pr_url> | add-comment <id> <html> | get-comments <id> | update-description <id> | append-description <id> | prepend-description <id> | create-task <name> [desc] [priority] [backlog|todo|pre-ai] [label] [link_from_id] | task-url <id> | create-page <name> [desc_html|@file] | main-page [page_name] [env_key] | page-url <id> | get-page <id> [out_file] | edit-page <id> [name] [desc_html|@file] | rename-page <id> <name> | remove-page <id> | archive-page <id> | unarchive-page <id> | search-pages <query> | done-in-period <from> [<to>] | review-done-in-period <from> [<to>] | get-issue <id> | get-task <ref, e.g. TM-808> | list-states | list-labels | list-projects | upload-asset <file> <issue_id> [project_id] | download-asset <asset_id> <out_path> <issue_id> [project_id] | list-images <issue_id>"
         exit 1
         ;;
 esac
