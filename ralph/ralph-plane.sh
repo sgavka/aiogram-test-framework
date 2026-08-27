@@ -6,6 +6,58 @@ set -euo pipefail
 # (empty iteration logs, in=0/out=0/turns=0, "finished (no signal)").
 export IS_SANDBOX=1
 
+# ── Self-replacement guard ───────────────────────────────────────────────────
+# Bash reads a script lazily, by byte offset, WHILE executing it. Overwriting
+# this file in place mid-run (`cp`/`>` onto the same inode) makes the still
+# running shell resume at a now-meaningless offset: it silently stops with
+# exit 0 and no error. That is not hypothetical — a ralph task in this repo
+# copied a new template/scripts/ralph-plane.sh over its own running
+# docs/ralph-plane.sh on 2026-08-26 and killed the session (see task #1453).
+# Any project whose ralph task edits its own deployed loop script can hit it.
+#
+# Defence, in two parts:
+#   1. Here: immediately re-exec from a private temp copy, so the on-disk
+#      original can be replaced freely while a run is in flight.
+#   2. self_update_check() below: between iterations, checksum the on-disk
+#      original and, if it changed, exec the new version deliberately at a
+#      safe point instead of being corrupted mid-iteration.
+#
+# The temp copy must NOT change how siblings are resolved — PLANE.md,
+# plane.sh, github.sh and ralph-logs/ are located relative to this script (see
+# CLAUDE.md, "Architecture: the scripts"), which for the copy would be the
+# temp dir. RALPH_SELF_DIR is exported before the re-exec and RALPH_DIR is
+# taken from it, so resolution stays anchored to the real deployment dir.
+# (Note the copy still only protects an in-place overwrite. Replacing the file
+# by atomic rename — write a temp file, then `mv` it over — is safe with or
+# without this guard, because the running shell keeps its fd on the old inode.
+# Prefer `mv` over `cp` when syncing a loop script into a live project.)
+RALPH_SELF_PATH="${RALPH_SELF_PATH:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")}"
+RALPH_SELF_DIR="${RALPH_SELF_DIR:-$(dirname "$RALPH_SELF_PATH")}"
+export RALPH_SELF_PATH RALPH_SELF_DIR
+
+# Original argv, replayed verbatim on a deliberate self-update re-exec below.
+RALPH_ARGS=("$@")
+
+if [ -z "${RALPH_SELF_COPY:-}" ]; then
+    _self_copy=$(mktemp "${TMPDIR:-/tmp}/ralph-plane-XXXXXX.sh" 2>/dev/null || echo "")
+    if [ -n "$_self_copy" ] && cp "$RALPH_SELF_PATH" "$_self_copy" 2>/dev/null; then
+        chmod +x "$_self_copy" 2>/dev/null || true
+        export RALPH_SELF_COPY="$_self_copy"
+        exec bash "$_self_copy" ${RALPH_ARGS[@]+"${RALPH_ARGS[@]}"}
+    fi
+    # No usable temp dir: keep running from the original rather than refusing
+    # to start — the loop still works, it just stays vulnerable to an in-place
+    # overwrite, so say so loudly.
+    rm -f "$_self_copy" 2>/dev/null || true
+    echo "WARNING: could not create a temp copy of $RALPH_SELF_PATH — running in place (an in-place edit of this file mid-run will kill the loop)" >&2
+fi
+
+# Checksum of the on-disk original as of this process start. Recomputed fresh
+# in every process (deliberately NOT exported), so a self-update re-exec
+# baselines against the new file.
+_self_checksum() { md5sum "$RALPH_SELF_PATH" 2>/dev/null | awk '{print $1}'; }
+RALPH_SELF_SUM="$(_self_checksum)"
+
 MODEL=""
 CLI_MODEL=""
 CONTINUE_MODE=false
@@ -13,7 +65,10 @@ ITERATION=0
 # The dir this script (and PLANE.md, plane.sh, github.sh, ...) lives in —
 # derived from the script's own location so the same file works from docs/,
 # ralph/, or any other folder (see RALPH_SCRIPT in ralph.md / render.sh).
-RALPH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Taken from RALPH_SELF_DIR (resolved above from the ORIGINAL file's location)
+# rather than from BASH_SOURCE directly, because when running from the temp
+# self-copy BASH_SOURCE points at the temp dir, which has no siblings.
+RALPH_DIR="$RALPH_SELF_DIR"
 PROMPT_FILE="$RALPH_DIR/PLANE.md"
 
 # Live status for the `agent` script / Telegram watcher (see ralph.md) — a fixed
@@ -58,7 +113,14 @@ state_watcher() {
     done
 }
 
-trap '[ -n "$WATCHER_PID" ] && kill "$WATCHER_PID" 2>/dev/null; rm -f "$STATE_FILE" "$AGENT_STATE_DIR/tasks/${REPO_NAME}.want" "$AGENT_STATE_DIR/tasks/${REPO_NAME}.granted" 2>/dev/null' EXIT
+trap '[ -n "$WATCHER_PID" ] && kill "$WATCHER_PID" 2>/dev/null; rm -f "$STATE_FILE" "$AGENT_STATE_DIR/tasks/${REPO_NAME}.want" "$AGENT_STATE_DIR/tasks/${REPO_NAME}.granted" ${RALPH_SELF_COPY:+"$RALPH_SELF_COPY"} 2>/dev/null' EXIT
+
+# Task-lookup guards. A Plane API failure (5xx, Cloudflare "error code: 524",
+# any non-JSON body) must never be mistaken for "a task is available": an empty
+# TASK_JSON used to fall through and burn a whole claude iteration on an empty
+# "## Your task" block. Treat "not valid JSON" and "no .id" as lookup failures.
+_is_json() { printf '%s' "$1" | jq -e . >/dev/null 2>&1; }
+_task_id_of() { printf '%s' "$1" | jq -r '.id // ""' 2>/dev/null || echo ""; }
 
 # Optional per-project daily iteration cap (RALPH_MAX_ITERATIONS_PER_DAY).
 # Persisted outside the process (this loop runs forever, but the counter must
@@ -173,11 +235,14 @@ load_env() {
     RALPH_MAX_ITERATIONS_PER_DAY="${RALPH_MAX_ITERATIONS_PER_DAY:-0}"
     # Iteration post-mortem thresholds (see end of the main loop below) — either
     # set to 0 disables that trigger; both 0 disables the analysis entirely.
-    # Same default durations as the VM-global Telegram watcher (ralph.md) so
-    # a "why was this long" comment tends to land on the same iterations that
-    # already paged Telegram.
-    RALPH_ANALYZE_SECONDS="${RALPH_ANALYZE_SECONDS:-600}"
-    RALPH_ANALYZE_TOKENS="${RALPH_ANALYZE_TOKENS:-150000}"
+    # TEMPORARILY DISABLED for every project (both default to 0, v62): the
+    # post-mortem costs an extra `claude` call per long iteration and was
+    # firing often enough to be noise rather than signal. The feature itself
+    # is untouched — a project that still wants it sets non-zero values in its
+    # own deployed .env (the previous defaults were 600s / 150000 tokens, the
+    # same durations the VM-global Telegram watcher in ralph.md uses).
+    RALPH_ANALYZE_SECONDS="${RALPH_ANALYZE_SECONDS:-0}"
+    RALPH_ANALYZE_TOKENS="${RALPH_ANALYZE_TOKENS:-0}"
     RALPH_ANALYZE_MODEL="${RALPH_ANALYZE_MODEL:-haiku}"
     # CLI --model always wins over RALPH_MODEL, every reload.
     MODEL="${CLI_MODEL:-${RALPH_MODEL:-claude-opus-5}}"
@@ -332,13 +397,16 @@ sweep_failed_tests() {
 # iterations and across projects. Run unconditionally after every iteration,
 # regardless of outcome: kills every running container on the host except
 # ones whose name matches RALPH_DOCKER_KILL_EXCLUDE (comma list of
-# case-insensitive substrings, default: shoper,crypto-trader — those two run
-# persistent services that must never be interrupted by another project's
-# iteration finishing). Best-effort: silently skipped if docker is not
+# case-insensitive substrings, default: shoper,crypto-trader,optizium — those
+# run persistent services that must never be interrupted by another project's
+# iteration finishing. "optizium" alone covers all three optizium/new-optizium/
+# optizium-nginx containers since Docker Compose's default container naming
+# (<project-dir-name>-<service>-<n>) makes every one of their container names
+# contain that substring). Best-effort: silently skipped if docker is not
 # installed.
 cleanup_docker_containers() {
     command -v docker >/dev/null 2>&1 || return 0
-    local exclude="${RALPH_DOCKER_KILL_EXCLUDE:-shoper,crypto-trader}"
+    local exclude="${RALPH_DOCKER_KILL_EXCLUDE:-shoper,crypto-trader,optizium}"
     local pattern="${exclude//,/|}"
     local victims
     # The trailing `|| true` matters under `set -o pipefail`: grep exits 1 when
@@ -350,6 +418,40 @@ cleanup_docker_containers() {
     printf "\033[90m[%s] Killing docker containers (except %s)...\033[0m" "$(date +%H:%M:%S)" "$exclude"
     # shellcheck disable=SC2086
     docker kill $victims >/dev/null 2>&1 && printf " \033[32mOK\033[0m\n" || printf " \033[33mfailed\033[0m\n"
+}
+
+# Part 2 of the self-replacement guard (see the top of this file): between
+# iterations — no task in flight, no task slot held, no claude subprocess — pick
+# up a new version of the on-disk original deliberately, by re-exec'ing it. The
+# re-exec drops RALPH_SELF_* so the fresh process makes its own temp copy and
+# re-baselines its checksum against the new file.
+self_update_check() {
+    local now orig
+    now=$(_self_checksum)
+    [ -n "$now" ] || return 0
+    [ "$now" = "$RALPH_SELF_SUM" ] && return 0
+
+    orig="$RALPH_SELF_PATH"
+    # Never exec a half-written or broken file: a syntax error here would take
+    # the whole loop down permanently, which is exactly what this guard exists
+    # to prevent. Re-baseline anyway so this does not warn every iteration —
+    # the next edit changes the checksum again and re-triggers the check.
+    if ! bash -n "$orig" 2>/dev/null; then
+        echo -e "\033[1;31m[$(date +%H:%M:%S)] $orig changed on disk but does not parse (bash -n) — staying on the running version\033[0m" >&2
+        RALPH_SELF_SUM="$now"
+        return 0
+    fi
+
+    echo ""
+    echo -e "\033[1;36m[$(date +%H:%M:%S)] $orig changed on disk — restarting the loop with the new version\033[0m"
+    echo ""
+    print_usage_summary
+    release_task_slot
+    [ -n "${WATCHER_PID:-}" ] && kill "$WATCHER_PID" 2>/dev/null
+    rm -f "$STATE_FILE" 2>/dev/null || true
+    [ -n "${RALPH_SELF_COPY:-}" ] && rm -f "$RALPH_SELF_COPY"
+    unset RALPH_SELF_COPY RALPH_SELF_PATH RALPH_SELF_DIR
+    exec bash "$orig" ${RALPH_ARGS[@]+"${RALPH_ARGS[@]}"}
 }
 
 LOGS_DIR="$RALPH_DIR/ralph-logs/$(date +%Y%m%d-%H%M%S)"
@@ -372,6 +474,9 @@ echo -e "\033[1;35m════════════════════�
 echo ""
 
 while true; do
+    # Safe point to adopt an edited copy of this script (see self_update_check).
+    self_update_check
+
     ITER_RESUME=false
     TASK_JSON=""
     TASK_ID=""
@@ -393,30 +498,43 @@ while true; do
 
         # Check for an interrupted in-progress task first (resume after restart)
         IP_RESULT=""
-        if IP_RESULT=$("$RALPH_DIR/plane.sh" task-in-progress 2>/dev/null); then
-            IP_DONE=$(echo "$IP_RESULT" | jq -r '.done // false' 2>/dev/null || echo "false")
-            if [ "$IP_DONE" != "true" ]; then
-                ITER_RESUME=true
-                TASK_JSON="$IP_RESULT"
-                printf " \033[33mresuming in-progress task\033[0m\n"
-            fi
+        IP_RC=0
+        IP_RESULT=$("$RALPH_DIR/plane.sh" task-in-progress 2>/dev/null) || IP_RC=$?
+        if [ "$IP_RC" -ne 0 ] || ! _is_json "$IP_RESULT"; then
+            printf " \033[31mtask-in-progress lookup failed (exit %s). Waiting %ss...\033[0m\n" "$IP_RC" "$RALPH_WAIT_INTERVAL"
+            sleep "$RALPH_WAIT_INTERVAL"
+            continue
+        fi
+        IP_DONE=$(echo "$IP_RESULT" | jq -r '.done // false' 2>/dev/null || echo "false")
+        if [ "$IP_DONE" != "true" ] && [ -n "$(_task_id_of "$IP_RESULT")" ]; then
+            ITER_RESUME=true
+            TASK_JSON="$IP_RESULT"
+            printf " \033[33mresuming in-progress task\033[0m\n"
         fi
 
         if [ "$ITER_RESUME" = "false" ]; then
             NEXT_TASK_CHECK=""
-            if NEXT_TASK_CHECK=$("$RALPH_DIR/plane.sh" next-task 2>/dev/null); then
-                TASK_IS_DONE=$(echo "$NEXT_TASK_CHECK" | jq -r '.done // false' 2>/dev/null || echo "false")
-            else
-                TASK_IS_DONE="false"
+            NEXT_TASK_RC=0
+            NEXT_TASK_CHECK=$("$RALPH_DIR/plane.sh" next-task 2>/dev/null) || NEXT_TASK_RC=$?
+            if [ "$NEXT_TASK_RC" -ne 0 ] || ! _is_json "$NEXT_TASK_CHECK"; then
+                printf " \033[31mnext-task lookup failed (exit %s). Waiting %ss...\033[0m\n" "$NEXT_TASK_RC" "$RALPH_WAIT_INTERVAL"
+                sleep "$RALPH_WAIT_INTERVAL"
+                continue
             fi
 
+            TASK_IS_DONE=$(echo "$NEXT_TASK_CHECK" | jq -r '.done // false' 2>/dev/null || echo "false")
             if [ "$TASK_IS_DONE" = "true" ]; then
-                printf " \033[33mno tasks. Waiting %ss...\033[0m\n" "$RALPH_WAIT_INTERVAL"
+                printf " \033[33mno tasks. Waiting %ss...\033[0m\n" "$RALPH_WAIT_INTERVAL"
+                sleep "$RALPH_WAIT_INTERVAL"
+                continue
+            fi
+            if [ -z "$(_task_id_of "$NEXT_TASK_CHECK")" ]; then
+                printf " \033[31mnext-task returned no task id. Waiting %ss...\033[0m\n" "$RALPH_WAIT_INTERVAL"
                 sleep "$RALPH_WAIT_INTERVAL"
                 continue
             fi
             TASK_JSON="$NEXT_TASK_CHECK"
-            printf " \033[32mOK\033[0m\n"
+            printf " \033[32mOK\033[0m\n"
         fi
 
 
@@ -446,6 +564,17 @@ while true; do
         break
     done
 
+    # Last line of defence: never invoke claude with an empty "## Your task"
+    # block. Both selection paths above already reject a failed lookup, so this
+    # only fires on an unforeseen shape — cheap enough to keep, since the cost of
+    # missing it is a wasted iteration plus one of the global task slots.
+    TASK_ID=$(_task_id_of "$TASK_JSON")
+    if [ -z "$TASK_ID" ]; then
+        printf "\033[31m[%s] Selected task has no id - skipping. Waiting %ss...\033[0m\n" "$(date +%H:%M:%S)" "$RALPH_WAIT_INTERVAL"
+        sleep "$RALPH_WAIT_INTERVAL"
+        continue
+    fi
+
     # System-wide task-execution concurrency: request a slot from the
     # agent-scheduler.sh broker (see ralph.md) before actually starting this
     # iteration. All project loops run continuously and unthrottled — only
@@ -473,7 +602,6 @@ while true; do
     cat "$PROMPT_FILE" > "$PROMPT_INPUT"
 
     # The loop owns task selection and state. Log the task, then start it.
-    TASK_ID=$(echo "$TASK_JSON" | jq -r '.id // ""' 2>/dev/null || echo "")
     TASK_SEQ=$(echo "$TASK_JSON" | jq -r '.sequence_id // "?"' 2>/dev/null || echo "?")
     TASK_NAME=$(echo "$TASK_JSON" | jq -r '.name // ""' 2>/dev/null || echo "")
     echo -e "\033[1;36m[$(date +%H:%M:%S)] Task #${TASK_SEQ}: ${TASK_NAME}\033[0m"
@@ -717,7 +845,9 @@ while true; do
     # so whoever looks at the task afterward (or the Telegram "running long"
     # alert, if it also fired) gets a cause, not just a bare duration/token
     # count. Either RALPH_ANALYZE_SECONDS or RALPH_ANALYZE_TOKENS set to 0
-    # disables that trigger; best-effort, never fails the iteration.
+    # disables that trigger; best-effort, never fails the iteration. Both
+    # default to 0 as of v62, so this whole block is inert unless a project
+    # opts back in via its own .env (see load_env above).
     ANALYSIS_HTML=""
     ANALYZE_REASON=""
     if [ "$RALPH_ANALYZE_SECONDS" -gt 0 ] 2>/dev/null && [ "$ITER_ELAPSED_SECONDS" -ge "$RALPH_ANALYZE_SECONDS" ]; then
