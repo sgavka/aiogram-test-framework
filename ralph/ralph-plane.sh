@@ -89,7 +89,7 @@ write_state() {
     local status="$1"
     mkdir -p "$AGENT_STATE_DIR" 2>/dev/null || true
     cat > "$STATE_FILE" 2>/dev/null <<EOF || true
-{"repo":"$REPO_NAME","status":"$status","iteration":${ITERATION},"started_at":${ITER_STARTED_AT:-0},"context_tokens":${LIVE_CTX:-0},"context_window":${LIVE_CTX_WINDOW:-200000},"updated_at":$(date +%s)}
+{"repo":"$REPO_NAME","status":"$status","iteration":${ITERATION},"started_at":${ITER_STARTED_AT:-0},"context_tokens":${LIVE_CTX:-0},"context_window":${LIVE_CTX_WINDOW:-200000},"task_id":"${TASK_ID:-}","updated_at":$(date +%s)}
 EOF
 }
 
@@ -252,6 +252,16 @@ load_env() {
     RALPH_NIGHT_END="${RALPH_NIGHT_END:-7}"
     # Optional per-project cap on iterations (claude calls) per local day; 0 = unlimited.
     RALPH_MAX_ITERATIONS_PER_DAY="${RALPH_MAX_ITERATIONS_PER_DAY:-0}"
+    # Optional weekly-window gate, sibling to RALPH_MAX_LIMIT_PCT but checked
+    # against the "/usage" output's "Current week (all models)" line instead
+    # of "Current session"; 0 = disabled (default — matches
+    # RALPH_MAX_ITERATIONS_PER_DAY's "0 = unlimited" convention, so rolling
+    # this out to an already-deployed project cannot suddenly stall a loop
+    # that is already sitting above whatever threshold an operator would
+    # have picked). Unlike RALPH_MAX_LIMIT_PCT, there is no night-time bump —
+    # the weekly window does not reset until the week does regardless of
+    # local time, so a higher off-hours threshold would not buy anything back.
+    RALPH_MAX_WEEK_PCT="${RALPH_MAX_WEEK_PCT:-0}"
     # Iteration post-mortem thresholds (see end of the main loop below) — either
     # set to 0 disables that trigger; both 0 disables the analysis entirely.
     # TEMPORARILY DISABLED for every project (both default to 0, v62): the
@@ -363,17 +373,24 @@ is_night_time() {
     fi
 }
 
-# Check current Claude subscription usage via `claude -p "/usage"`.
-# Returns the highest percentage found across all "Current" limit lines (0-100).
+# Check current Claude subscription usage via `claude -p "/usage"`. Its output
+# always has (at least) two separate rolling-window lines, "Current session"
+# and "Current week (all models)" — sets CLAUDE_SESSION_PCT/CLAUDE_WEEK_PCT
+# from each rather than returning a single number, since RALPH_MAX_LIMIT_PCT
+# and RALPH_MAX_WEEK_PCT below gate on them independently. Either defaults to
+# 99 (treated as "at the limit") if its line cannot be parsed, so a parse
+# failure blocks a new iteration rather than silently allowing one past a
+# limit that could not be read.
 check_claude_limits() {
     local output
     output=$(claude -p "/usage" 2>/dev/null) || output=""
     # Strip ANSI escape codes before parsing (output differs in non-interactive mode)
     local clean
     clean=$(printf '%s' "$output" | sed 's/\x1b\[[0-9;]*m//g')
-    local max_pct
-    max_pct=$(printf '%s' "$clean" | grep "Current session:" | sed -n 's/.*: \([0-9]*\)% used.*/\1/p')
-    echo "${max_pct:-99}"
+    CLAUDE_SESSION_PCT=$(printf '%s' "$clean" | grep "Current session:" | sed -n 's/.*: \([0-9]*\)% used.*/\1/p')
+    CLAUDE_WEEK_PCT=$(printf '%s' "$clean" | grep "Current week (all models):" | sed -n 's/.*: \([0-9]*\)% used.*/\1/p')
+    CLAUDE_SESSION_PCT="${CLAUDE_SESSION_PCT:-99}"
+    CLAUDE_WEEK_PCT="${CLAUDE_WEEK_PCT:-99}"
 }
 
 # Pre-iteration sweep: any task in Review whose PR's *test* check failed is moved
@@ -405,6 +422,45 @@ sweep_failed_tests() {
             fi
             cmt="${cmt}</p>"
             "$RALPH_DIR/plane.sh" add-comment "$id" "$cmt" 2>/dev/null || true
+            "$RALPH_DIR/plane.sh" set-todo "$id" 2>/dev/null || true
+        fi
+    done
+}
+
+# Pre-iteration sweep: any task in Review whose PR now has a merge conflict
+# against its base branch is moved back to Todo so next-task can re-pick it
+# and rebase/resolve. GitHub computes mergeability asynchronously, so UNKNOWN
+# (not yet settled) and MERGEABLE both leave the task alone — only a
+# confirmed CONFLICTING result demotes it. Forces "Effort: medium" onto the
+# description (appended, so the last-wins "Effort:" parser in the main loop
+# picks it up on the next pickup) since resolving a conflict is rarely a
+# low-effort fix, even if the task originally ran cheaper.
+sweep_merge_conflicts() {
+    local review_json count
+    review_json=$("$RALPH_DIR/plane.sh" list-review 2>/dev/null) || return 0
+    [ -z "$review_json" ] && return 0
+    count=$(echo "$review_json" | jq 'length' 2>/dev/null || echo 0)
+    [ "${count:-0}" -eq 0 ] && return 0
+
+    local i id seq branch mergeable pr_url cmt
+    for i in $(seq 0 $((count - 1))); do
+        id=$(echo "$review_json" | jq -r ".[$i].id")
+        seq=$(echo "$review_json" | jq -r ".[$i].sequence_id // \"?\"")
+        branch=$(echo "$review_json" | jq -r ".[$i].description_html // \"\"" \
+            | grep -oP '(?<=Branch: <code>)[^<]+' | tail -1 || echo "")
+        [ -z "$branch" ] && continue
+        mergeable=$("$RALPH_DIR/github.sh" mergeable "$branch" 2>/dev/null || echo "NONE")
+        if [ "$mergeable" = "CONFLICTING" ]; then
+            printf "\033[90m[%s]\033[0m \033[31mMerge conflict on #%s (%s) — moving → Todo\033[0m\n" \
+                "$(date +%H:%M:%S)" "$seq" "$branch"
+            pr_url=$("$RALPH_DIR/github.sh" pr-url "$branch" 2>/dev/null || echo "")
+            cmt="<p>PR has a <strong>merge conflict</strong> with its base branch on <code>${branch}</code> — moved back to Todo to rebase/resolve."
+            if [ -n "$pr_url" ]; then
+                cmt="${cmt} See <a href=\"${pr_url}\">the PR</a>."
+            fi
+            cmt="${cmt}</p>"
+            "$RALPH_DIR/plane.sh" add-comment "$id" "$cmt" 2>/dev/null || true
+            printf '<p>Effort: medium</p>' | "$RALPH_DIR/plane.sh" append-description "$id" 2>/dev/null || true
             "$RALPH_DIR/plane.sh" set-todo "$id" 2>/dev/null || true
         fi
     done
@@ -511,6 +567,9 @@ while true; do
     # Pre-iteration sweep: demote Review tasks whose PR tests failed back to Todo.
     sweep_failed_tests
 
+    # Pre-iteration sweep: demote Review tasks whose PR now conflicts with its base branch back to Todo.
+    sweep_merge_conflicts
+
     # Pre-iteration gate: wait until a task exists AND Claude API limits are acceptable
     while true; do
         # Re-read .env on every retry, not just once per outer iteration
@@ -576,17 +635,27 @@ while true; do
             fi
         fi
         printf "\033[90m[%s] Checking limits...\033[0m" "$(date +%H:%M:%S)"
-        LIMIT_PCT=$(check_claude_limits)
-        LIMIT_PCT="${LIMIT_PCT:-0}"
+        check_claude_limits
+        LIMIT_PCT="${CLAUDE_SESSION_PCT:-0}"
+        WEEK_PCT="${CLAUDE_WEEK_PCT:-0}"
         EFFECTIVE_MAX_PCT="$RALPH_MAX_LIMIT_PCT"
         is_night_time && EFFECTIVE_MAX_PCT="${RALPH_NIGHT_MAX_LIMIT_PCT:-90}"
-        if [ "${LIMIT_PCT:-0}" -ge "$EFFECTIVE_MAX_PCT" ] 2>/dev/null; then
-            printf " \033[33m%s%% used >= %s%% threshold. Waiting %ss...\033[0m\n" \
+        if [ "$LIMIT_PCT" -ge "$EFFECTIVE_MAX_PCT" ] 2>/dev/null; then
+            printf " \033[33msession %s%% used >= %s%% threshold. Waiting %ss...\033[0m\n" \
                 "$LIMIT_PCT" "$EFFECTIVE_MAX_PCT" "$RALPH_WAIT_INTERVAL"
             sleep "$RALPH_WAIT_INTERVAL"
             continue
         fi
-        printf " \033[32m%s%% used (limit %s%%)\033[0m\n" "$LIMIT_PCT" "$EFFECTIVE_MAX_PCT"
+        if [ "$RALPH_MAX_WEEK_PCT" -gt 0 ] 2>/dev/null && [ "$WEEK_PCT" -ge "$RALPH_MAX_WEEK_PCT" ] 2>/dev/null; then
+            printf " \033[33mweek %s%% used >= %s%% threshold. Waiting %ss...\033[0m\n" \
+                "$WEEK_PCT" "$RALPH_MAX_WEEK_PCT" "$RALPH_WAIT_INTERVAL"
+            sleep "$RALPH_WAIT_INTERVAL"
+            continue
+        fi
+        WEEK_LIMIT_DISPLAY=""
+        [ "$RALPH_MAX_WEEK_PCT" -gt 0 ] 2>/dev/null && WEEK_LIMIT_DISPLAY=" (limit ${RALPH_MAX_WEEK_PCT}%)"
+        printf " \033[32msession %s%% (limit %s%%), week %s%%%s\033[0m\n" \
+            "$LIMIT_PCT" "$EFFECTIVE_MAX_PCT" "$WEEK_PCT" "$WEEK_LIMIT_DISPLAY"
 
         break
     done
@@ -989,7 +1058,7 @@ while true; do
         rm -f "$LOG_TXT"
 
         # Post stats (+ secret log link if the gist was created) and move the task.
-        ITER_COMMENT="<p><code>in=${ITER_IN_TOTAL}</code> <code>out=${ITER_OUT}</code> <code>turns=${ITER_TURNS}</code> <code>peak_ctx=${PEAK_CTX}/${ITER_CTX_WINDOW} (${PEAK_PCT}%)</code> <code>cost=\$${ITER_COST}</code> <code>elapsed=${ITER_ELAPSED_SECONDS}s</code></p>${ANALYSIS_HTML}"
+        ITER_COMMENT="<p><code>model=${ITER_MODEL}</code> <code>effort=${ITER_EFFORT}</code> <code>in=${ITER_IN_TOTAL}</code> <code>out=${ITER_OUT}</code> <code>turns=${ITER_TURNS}</code> <code>peak_ctx=${PEAK_CTX}/${ITER_CTX_WINDOW} (${PEAK_PCT}%)</code> <code>cost=\$${ITER_COST}</code> <code>elapsed=${ITER_ELAPSED_SECONDS}s</code></p>${ANALYSIS_HTML}"
         if [ -n "$GIST_URL" ]; then
             ITER_COMMENT="${ITER_COMMENT}<p>Ralph logs (secret gist): <a href=\"${GIST_URL}\">${GIST_URL}</a></p>"
         fi

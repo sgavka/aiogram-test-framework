@@ -34,9 +34,21 @@ APP_INDEX="${ELASTIC_APP_INDEX:-app-logs-*}"
 EXTRA_FIELDS_RAW="${ELASTIC_EXTRA_FIELDS:-}"
 
 _es_post() {
-    curl -s -X POST "$ELASTIC_URL/$1/_search" \
+    local index="$1" body="$2" response http_code json_body
+    response=$(curl -sS -w '\n%{http_code}' -X POST "$ELASTIC_URL/$index/_search" \
         -H 'Content-Type: application/json' \
-        -d "$2"
+        -d "$body") || {
+        echo "ERROR: failed to reach Elasticsearch at $ELASTIC_URL (index: $index)" >&2
+        exit 1
+    }
+    http_code="${response##*$'\n'}"
+    json_body="${response%$'\n'*}"
+    if [[ ! "$http_code" =~ ^2 ]] || [ -z "$json_body" ]; then
+        echo "ERROR: Elasticsearch request to $ELASTIC_URL/$index/_search failed (HTTP ${http_code:-?})" >&2
+        [ -n "$json_body" ] && echo "$json_body" >&2
+        exit 1
+    fi
+    printf '%s' "$json_body"
 }
 
 # Parse "flag:field,flag:field" into two parallel arrays.
@@ -137,7 +149,8 @@ case "$cmd" in
     N="${1:-20}"
     FILTERS=$(_build_filters)
     BODY="{\"size\": $N, \"sort\": [{\"@timestamp\": \"desc\"}], \"query\": {\"bool\": {\"filter\": $FILTERS}}, \"_source\": $SOURCE_FIELDS}"
-    _es_post "$APP_INDEX" "$BODY" | ELASTIC_EXTRA_FIELDS="$EXTRA_FIELDS_RAW" python3 -c "$PRINT_HITS" "normal"
+    RESPONSE=$(_es_post "$APP_INDEX" "$BODY")
+    printf '%s' "$RESPONSE" | ELASTIC_EXTRA_FIELDS="$EXTRA_FIELDS_RAW" python3 -c "$PRINT_HITS" "normal"
     ;;
 
   search)
@@ -150,7 +163,8 @@ case "$cmd" in
     N="${1:-20}"
     FILTERS=$(_build_filters)
     BODY="{\"size\": $N, \"sort\": [{\"@timestamp\": \"desc\"}], \"query\": {\"bool\": {\"filter\": $FILTERS}}, \"_source\": $SOURCE_FIELDS}"
-    _es_post "$APP_INDEX" "$BODY" | ELASTIC_EXTRA_FIELDS="$EXTRA_FIELDS_RAW" python3 -c "$PRINT_HITS" "normal"
+    RESPONSE=$(_es_post "$APP_INDEX" "$BODY")
+    printf '%s' "$RESPONSE" | ELASTIC_EXTRA_FIELDS="$EXTRA_FIELDS_RAW" python3 -c "$PRINT_HITS" "normal"
     ;;
 
   tail)
@@ -159,7 +173,8 @@ case "$cmd" in
     N="${1:-20}"
     FILTERS=$(_build_filters)
     BODY="{\"size\": $N, \"sort\": [{\"@timestamp\": \"desc\"}], \"query\": {\"bool\": {\"filter\": $FILTERS}}, \"_source\": $SOURCE_FIELDS}"
-    _es_post "$APP_INDEX" "$BODY" | ELASTIC_EXTRA_FIELDS="$EXTRA_FIELDS_RAW" python3 -c "$PRINT_HITS" "reverse"
+    RESPONSE=$(_es_post "$APP_INDEX" "$BODY")
+    printf '%s' "$RESPONSE" | ELASTIC_EXTRA_FIELDS="$EXTRA_FIELDS_RAW" python3 -c "$PRINT_HITS" "reverse"
     ;;
 
   stats)
@@ -171,7 +186,8 @@ case "$cmd" in
     done
     AGGS+='}'
     BODY="{\"size\": 0, \"query\": {\"range\": {\"@timestamp\": {\"gte\": \"now-$PERIOD\"}}}, \"aggs\": $AGGS}"
-    _es_post "$APP_INDEX" "$BODY" | ELASTIC_EXTRA_FIELDS="$EXTRA_FIELDS_RAW" python3 -c '
+    RESPONSE=$(_es_post "$APP_INDEX" "$BODY")
+    printf '%s' "$RESPONSE" | ELASTIC_EXTRA_FIELDS="$EXTRA_FIELDS_RAW" python3 -c '
 import json, os, sys
 data = json.load(sys.stdin)
 aggs = data.get("aggregations", {})

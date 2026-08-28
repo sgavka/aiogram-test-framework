@@ -8,6 +8,7 @@
 #   github.sh pr-url <branch>               — PR html URL for a branch ("" if none)
 #   github.sh pr-state <branch>             — PR state: OPEN | MERGED | CLOSED | NONE
 #   github.sh tests-status <branch>         — test check only: SUCCESS | FAILURE | PENDING | NONE
+#   github.sh mergeable <branch>            — merge conflict status: MERGEABLE | CONFLICTING | UNKNOWN | NONE
 #   github.sh unresolved-threads <branch>   — unresolved review threads as JSON
 #                                                  [{id, path, line, startLine, side, outdated, author, url, body, diffHunk}]
 #   github.sh resolve-thread <thread_id>    — mark a review thread resolved
@@ -112,6 +113,21 @@ cmd_tests_status() {
     fi
 }
 
+# GitHub computes mergeability asynchronously after a push, so a freshly
+# opened/updated PR can briefly report UNKNOWN before settling into
+# MERGEABLE/CONFLICTING — callers should treat UNKNOWN as "not yet known",
+# not as "no conflict", and re-check later rather than acting on it.
+cmd_mergeable() {
+    local branch="${1:?branch required}"
+    local pr
+    pr=$(gh pr list --head "$branch" --json number --jq '.[0].number // empty')
+    if [ -z "$pr" ]; then
+        echo "NONE"
+        return
+    fi
+    gh pr view "$pr" --json mergeable --jq '.mergeable // "UNKNOWN"'
+}
+
 cmd_unresolved_threads() {
     local branch="${1:?branch required}"
     local pr
@@ -188,13 +204,14 @@ case "$CMD" in
     pr-url)              cmd_pr_url "${1:-}" ;;
     pr-state)            cmd_pr_state "${1:-}" ;;
     tests-status)        cmd_tests_status "${1:-}" ;;
+    mergeable)           cmd_mergeable "${1:-}" ;;
     unresolved-threads)  cmd_unresolved_threads "${1:-}" ;;
     resolve-thread)      cmd_resolve_thread "${1:-}" ;;
     create-pr)           cmd_create_pr "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
     deploy)              cmd_deploy "${1:-}" "${2:-}" ;;
     *)
         echo "Usage: $0 <command> [args]"
-        echo "Commands: pr-number <branch> | pr-url <branch> | pr-state <branch> | tests-status <branch> | unresolved-threads <branch> | resolve-thread <thread_id> | create-pr <base> <head> <title> <body> | deploy <workflow> <branch>"
+        echo "Commands: pr-number <branch> | pr-url <branch> | pr-state <branch> | tests-status <branch> | mergeable <branch> | unresolved-threads <branch> | resolve-thread <thread_id> | create-pr <base> <head> <title> <body> | deploy <workflow> <branch>"
         exit 1
         ;;
 esac
