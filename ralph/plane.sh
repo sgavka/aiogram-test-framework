@@ -18,7 +18,7 @@
 #   docs/plane.sh set-branch <id> <branch>              — append branch tag to description AND post a comment
 #   docs/plane.sh set-pr <id> <pr_url>                  — append PR link to description AND post a comment
 #   docs/plane.sh task-in-progress                      — in-progress task (filtered by PLANE_LABEL); {"done":true} if none
-#   docs/plane.sh create-task <name> [desc] [priority] [backlog|todo|pre-ai] [label] [link_from_id]  — create new issue; priority must be one of urgent, high, medium, low, none (default none) — any other value is rejected loudly; with link_from_id, appends a link to the new task onto that task's description; pre-ai targets a "Todo (pre-AI)"-style state for a task that needs operator triage before an agent should pick it up
+#   docs/plane.sh create-task <name> [desc] [priority] [backlog|todo|pre-ai] [label] [link_from_id]  — create new issue; priority must be one of urgent, high, medium, low, none (default none) — any other value is rejected loudly; with link_from_id, sets Plane's native parent field to it (so the new task shows as a sub-issue in Plane's own hierarchy) AND appends a link to the new task onto that task's description; pre-ai targets a "Todo (pre-AI)"-style state for a task that needs operator triage before an agent should pick it up
 #   docs/plane.sh task-url <id>                          — print an issue's web-app URL (for linking it from a comment/description)
 #   docs/plane.sh create-page <name> [desc_html|@file]   — create new project page (@file reads desc from a file)
 #   docs/plane.sh main-page [page_name] [env_key]         — get a root doc page by env_key (default PLANE_MAIN_DOC_PAGE_ID), creating it (named page_name) if it does not exist yet; response includes just_created: true/false. Pass a distinct env_key to track more than one root (e.g. separate dev/user doc hierarchies).
@@ -1151,6 +1151,14 @@ cmd_create_task() {
     # Every new task is assigned to PLANE_ASSIGNEE_ID (the operator's member UUID)
     # when configured, so tasks the agent files never sit unassigned. Absent =
     # no assignee, same behavior as before this key existed.
+    #
+    # link_from_id also sets Plane's own native `parent` field (Plane already
+    # has sub-issue/parent support — the injected task JSON's "parent" key is
+    # this same field) so the relationship shows up in Plane's own hierarchy
+    # UI, not just as a text link in the parent task's description. Since
+    # PLANE.md.tpl instructs the agent to always pass link_from_id for every
+    # task it creates, this makes every agent-created task a Plane sub-issue
+    # of the task that created it, automatically.
     local payload
     payload=$(jq -n \
         --arg name "$name" \
@@ -1158,11 +1166,13 @@ cmd_create_task() {
         --arg priority "$priority" \
         --arg state "$state_id" \
         --arg lbl "$label_id" \
-        --arg assignee "${PLANE_ASSIGNEE_ID:-}" '
+        --arg assignee "${PLANE_ASSIGNEE_ID:-}" \
+        --arg parent "$link_from_id" '
         {name: $name, priority: $priority, state: $state} +
         (if $desc != "" then {description_html: $desc} else {} end) +
         (if $lbl != "" then {labels: [$lbl]} else {} end) +
-        (if $assignee != "" then {assignees: [$assignee]} else {} end)
+        (if $assignee != "" then {assignees: [$assignee]} else {} end) +
+        (if $parent != "" then {parent: $parent} else {} end)
     ')
 
     local result
@@ -1172,6 +1182,7 @@ cmd_create_task() {
     # a clickable link to the newly created task onto that task's description
     # — the fiddly part of "create a related task" (build the URL, append the
     # HTML) so the agent does not have to do it as a separate manual step.
+    # (Plane's native parent field was already set above, from the same arg.)
     if [ -n "$link_from_id" ]; then
         local new_id new_seq new_name new_url link_html
         new_id=$(echo "$result" | jq -r '.id')
