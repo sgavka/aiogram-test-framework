@@ -35,13 +35,16 @@
 #   docs/plane.sh set-done <id>                          — move issue to Done (operator-triggered only)
 #   docs/plane.sh set-cancelled <id>                     — move issue to Cancelled (operator-triggered only)
 #   docs/plane.sh get-issue <id>                         — print full issue JSON
-#   docs/plane.sh get-task <PROJECT-123>                 — look up an issue by its human-readable ref (e.g. TM-808) and print full issue JSON + comments
+#   docs/plane.sh get-task <PROJECT-123>                 — look up an issue by its human-readable ref (e.g. TM-808) and print full issue JSON + comments; this is the ONLY command that accepts a ref — every other command below (including every set-* one) needs the UUID from this call's .id field instead. Passing a ref to one of those is not an obvious error: it returns a 404 with an all-null-fields JSON body, not a clear "not found."
 #   docs/plane.sh list-states                            — print all project states
 #   docs/plane.sh list-labels                            — print all project labels [{id,name}] (e.g. to find a sibling project's label for create-task)
 #   docs/plane.sh list-projects                          — print all workspace projects
 #   docs/plane.sh upload-asset <file> <issue_id> [project_id]              — upload an image/file, attached to the issue; print {asset_id, embed_html}
 #   docs/plane.sh download-asset <asset_id> <out_path> <issue_id> [project_id] — download an asset attached to the issue (e.g. an image embedded in a comment/description)
 #   docs/plane.sh list-images <issue_id>                 — JSON array of asset ids embedded in the issue's description + comments
+#   docs/plane.sh list-attachments <issue_id>            — JSON array of the issue's native file attachments (id, name, size, created_at) — files added via
+#                                                          Plane's own "Attach" UI panel, e.g. a zip; NOT the same set as list-images, which only scans for
+#                                                          images embedded inline in description/comment HTML and never sees a non-embedded file
 #
 # All comment/description bodies sent to Plane must be HTML, not Markdown.
 #
@@ -52,7 +55,10 @@
 # the HTML you send via add-comment/update-description/append-description. To
 # view an image someone else attached, run `list-images <issue_id>` to find
 # asset ids, then `download-asset <asset_id> <out_path> <issue_id>` and read
-# the file locally.
+# the file locally. A non-image file (e.g. a zip someone attached as
+# supporting material) never shows up this way — it is not embedded in any
+# HTML for list-images to scan. Run `list-attachments <issue_id>` for those
+# instead, then `download-asset` the same way with the id it returns.
 #
 # upload-asset/download-asset go through the per-issue work-item-attachments
 # endpoint (not the generic workspace-assets endpoint) because the generic
@@ -1494,6 +1500,28 @@ cmd_list_images() {
     '
 }
 
+# List an issue's native file attachments — files added through Plane's own
+# "Attach" UI panel, as distinct from an image embedded inline via
+# <image-component> in the description/a comment (see list-images above).
+# These two are NOT the same set: a non-image file (e.g. a zip) can only ever
+# arrive this way, since Plane's rich-text editor only embeds images, and
+# list-images's HTML scan never sees it. Confirmed live 2026-09-11 (task
+# TM-1876): GET .../issue-attachments/ with no id is itself a listing
+# endpoint (returns "[]" when empty), it was just never wired into a command
+# here — same endpoint cmd_upload_asset/cmd_download_asset already use by id.
+cmd_list_attachments() {
+    local issue_id="${1:?issue_id required}"
+    local pid
+    pid=$(_project_id)
+
+    _curl "$BASE/projects/$pid/issues/$issue_id/issue-attachments/" | jq '[.[] | {
+        id: (.id // .asset),
+        name: (.attributes.name // .name // "unknown"),
+        size: (.attributes.size // .size // null),
+        created_at
+    }]'
+}
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
@@ -1542,9 +1570,10 @@ case "$CMD" in
     upload-asset)     cmd_upload_asset "${1:?file path required}" "${2:?issue_id required}" "${3:-}" ;;
     download-asset)   cmd_download_asset "${1:?asset_id required}" "${2:?output_path required}" "${3:?issue_id required}" "${4:-}" ;;
     list-images)      cmd_list_images "${1:?issue_id required}" ;;
+    list-attachments) cmd_list_attachments "${1:?issue_id required}" ;;
     *)
         echo "Usage: $0 <command> [args]"
-        echo "Commands: next-task | task-in-progress | set-in-progress <id> | set-review <id> | set-todo <id> | set-label <id> <label> | set-priority <id> <priority> | list-review | list-blocked | set-done <id> | set-cancelled <id> | set-branch <id> <branch> | set-pr <id> <pr_url> | add-comment <id> <html> | get-comments <id> | update-description <id> | append-description <id> | prepend-description <id> | create-task <name> [desc] [priority] [backlog|todo|pre-ai] [label] [link_from_id] | task-url <id> | create-page <name> [desc_html|@file] | main-page [page_name] [env_key] | page-url <id> | get-page <id> [out_file] | edit-page <id> [name] [desc_html|@file] | rename-page <id> <name> | remove-page <id> | archive-page <id> | unarchive-page <id> | search-pages <query> | done-in-period <from> [<to>] | review-done-in-period <from> [<to>] | get-issue <id> | get-task <ref, e.g. TM-808> | list-states | list-labels | list-projects | upload-asset <file> <issue_id> [project_id] | download-asset <asset_id> <out_path> <issue_id> [project_id] | list-images <issue_id>"
+        echo "Commands: next-task | task-in-progress | set-in-progress <id> | set-review <id> | set-todo <id> | set-label <id> <label> | set-priority <id> <priority> | list-review | list-blocked | set-done <id> | set-cancelled <id> | set-branch <id> <branch> | set-pr <id> <pr_url> | add-comment <id> <html> | get-comments <id> | update-description <id> | append-description <id> | prepend-description <id> | create-task <name> [desc] [priority] [backlog|todo|pre-ai] [label] [link_from_id] | task-url <id> | create-page <name> [desc_html|@file] | main-page [page_name] [env_key] | page-url <id> | get-page <id> [out_file] | edit-page <id> [name] [desc_html|@file] | rename-page <id> <name> | remove-page <id> | archive-page <id> | unarchive-page <id> | search-pages <query> | done-in-period <from> [<to>] | review-done-in-period <from> [<to>] | get-issue <id> | get-task <ref, e.g. TM-808> | list-states | list-labels | list-projects | upload-asset <file> <issue_id> [project_id] | download-asset <asset_id> <out_path> <issue_id> [project_id] | list-images <issue_id> | list-attachments <issue_id>"
         exit 1
         ;;
 esac
