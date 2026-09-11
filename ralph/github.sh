@@ -61,7 +61,13 @@ cmd_pr_url() {
 cmd_pr_state() {
     local branch="${1:?branch required}"
     local out
-    if out=$(gh pr list --head "$branch" --json state --jq '.[0].state // "NONE"' 2>&1); then
+    # `gh pr list` defaults to open PRs only, so without --state a merged or
+    # closed PR reports "NONE" and MERGED/CLOSED are unreachable — every other
+    # <branch>-keyed command here keeps that open-only default on purpose (a
+    # merged PR must not feed tests-status/mergeable), but pr-state is the one
+    # command whose whole job is reporting which of the four states holds.
+    # Newest PR wins when a branch has carried more than one.
+    if out=$(gh pr list --state all --head "$branch" --json number,state --jq '(sort_by(.number) | last | .state) // "NONE"' 2>&1); then
         echo "$out"
     else
         # Surface the real gh error on stderr instead of silently reporting
