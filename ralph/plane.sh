@@ -2,7 +2,7 @@
 # Plane.so API helper for the ralph-plane.sh workflow.
 #
 # Usage (run from repo root):
-#   docs/plane.sh next-task                              — highest-priority Todo task + its comments (filtered by PLANE_LABEL); also skips a candidate whose description carries an unreached "Recheck-after: <YYYY-MM-DD>" date (see PLANE_RESPECT_BLOCKERS below — same gate, same per-candidate description fetch)
+#   docs/plane.sh next-task                              — highest-priority Todo task + its comments (filtered by PLANE_LABEL); also skips a candidate whose description carries an unreached "Recheck-after: <YYYY-MM-DD>[THH:MM]" date/time (see PLANE_RESPECT_BLOCKERS below — same gate, same per-candidate description fetch)
 #   docs/plane.sh set-in-progress <id>                   — move issue to "In Progress" state (automation-internal)
 #   docs/plane.sh set-review <id>                        — move issue to "Review" state (automation-internal)
 #   docs/plane.sh set-todo <id>                          — move issue back to "Todo" state (automation-internal)
@@ -83,9 +83,11 @@
 #                   PLANE_RESPECT_BLOCKERS  (1 to skip next-task candidates blocked by an unresolved "Blocked by: #<seq>" reference;
 #                                            add "(review)" — e.g. "Blocked by: #<seq> (review)" — to resolve as soon as the
 #                                            blocker reaches a Review-named state instead of waiting for Done/Cancelled. Also
-#                                            gates the "Recheck-after: <YYYY-MM-DD>" convention — a candidate carrying an
-#                                            unreached future date in its description is skipped the same way, for a periodic
-#                                            recheck task that should not be picked again until that date arrives)
+#                                            gates the "Recheck-after: <YYYY-MM-DD>[THH:MM]" convention — a candidate carrying an
+#                                            unreached future date/time in its description is skipped the same way, for a periodic
+#                                            recheck task that should not be picked again until that date/time arrives; the time
+#                                            part is optional and lets a short recheck (e.g. "in 30 minutes") resolve same-day
+#                                            instead of only at day granularity)
 #                   PLANE_ASSIGNEE_ID       (member UUID; create-task assigns every new task to this member. Absent = no
 #                                            assignee set, same as before this key existed)
 
@@ -444,17 +446,28 @@ _BLOCKER_JQ='
 '
 
 # jq program shared by next-task's blocker walk: given a candidate's
-# description_html (as $desc) and today's date (as $today, "YYYY-MM-DD"),
-# emit {pending: bool} — true when the description carries a
-# "Recheck-after: <YYYY-MM-DD>" convention whose date has not yet arrived.
-# Mirrors the "Blocked by:" convention above for periodic recheck tasks
-# (e.g. "did this outage recur?") that should not be re-picked until a given
-# date, without needing a human to manually requeue them or a separate
-# backlog follow-up task. Multiple occurrences: the last one wins, same
-# tail -1 convention used for the "Branch: <code>" tag. ISO dates compare
-# correctly as plain strings, so no date arithmetic is needed.
+# description_html (as $desc) and the current moment (as $today,
+# "YYYY-MM-DDTHH:MM"), emit {pending: bool} — true when the description
+# carries a "Recheck-after: <YYYY-MM-DD>" or "Recheck-after:
+# <YYYY-MM-DD>T<HH:MM>" convention whose date/time has not yet arrived. The
+# time part is optional so a bare date still means "any time that day" — a
+# short recheck (e.g. "check again in 30 minutes") needs the T<HH:MM> to
+# avoid waiting until the following day. Mirrors the "Blocked by:"
+# convention above for periodic recheck tasks (e.g. "did this outage
+# recur?") that should not be re-picked until a given date/time, without
+# needing a human to manually requeue them or a separate backlog follow-up
+# task. Multiple occurrences: the last one wins, same tail -1 convention
+# used for the "Branch: <code>" tag. ISO date/time strings compare correctly
+# as plain strings even when one side omits the time (a bare date is a
+# strict string-prefix of the same day's timestamp, and a strict prefix
+# always sorts as "less than" the longer string it prefixes), so no date
+# arithmetic is needed — but only as long as every value uses the same "T"
+# separator as $today below; a space separator (e.g. "2026-09-17 15:30")
+# sorts *before* the "T" form at that byte (' ' < 'T' in ASCII) and silently
+# breaks the comparison, so the regex deliberately requires a literal "T",
+# not "[T ]".
 _RECHECK_JQ='
-    ($desc | [scan("(?i)recheck[- ]after:?\\s*([0-9]{4}-[0-9]{2}-[0-9]{2})")] | last) as $date
+    ($desc | [scan("(?i)recheck[- ]after:?\\s*([0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2})?)")] | last) as $date
     | {pending: ($date != null and $date[0] > $today)}
 '
 
@@ -535,7 +548,7 @@ cmd_next_task() {
     rm -f "$issues_tmp"
 
     local today
-    today=$(date -u +%Y-%m-%d)
+    today=$(date -u +%Y-%m-%dT%H:%M)
 
     # Walk candidates highest-priority-first, reading each one's description
     # only until an unblocked, un-rechecked one is found — the winner's
