@@ -2,7 +2,7 @@
 # Plane.so API helper for the ralph-plane.sh workflow.
 #
 # Usage (run from repo root):
-#   docs/plane.sh next-task                              — highest-priority Todo task + its comments (filtered by PLANE_LABEL)
+#   docs/plane.sh next-task                              — highest-priority Todo task + its comments (filtered by PLANE_LABEL); also skips a candidate whose description carries an unreached "Recheck-after: <YYYY-MM-DD>" date (see PLANE_RESPECT_BLOCKERS below — same gate, same per-candidate description fetch)
 #   docs/plane.sh set-in-progress <id>                   — move issue to "In Progress" state (automation-internal)
 #   docs/plane.sh set-review <id>                        — move issue to "Review" state (automation-internal)
 #   docs/plane.sh set-todo <id>                          — move issue back to "Todo" state (automation-internal)
@@ -82,7 +82,10 @@
 #                                            loop on a shared board must never fall back to seeing every project's tasks)
 #                   PLANE_RESPECT_BLOCKERS  (1 to skip next-task candidates blocked by an unresolved "Blocked by: #<seq>" reference;
 #                                            add "(review)" — e.g. "Blocked by: #<seq> (review)" — to resolve as soon as the
-#                                            blocker reaches a Review-named state instead of waiting for Done/Cancelled)
+#                                            blocker reaches a Review-named state instead of waiting for Done/Cancelled. Also
+#                                            gates the "Recheck-after: <YYYY-MM-DD>" convention — a candidate carrying an
+#                                            unreached future date in its description is skipped the same way, for a periodic
+#                                            recheck task that should not be picked again until that date arrives)
 #                   PLANE_ASSIGNEE_ID       (member UUID; create-task assigns every new task to this member. Absent = no
 #                                            assignee set, same as before this key existed)
 
@@ -440,6 +443,21 @@ _BLOCKER_JQ='
     | {blocked: (map(.resolved) | all | not), blockers: .}
 '
 
+# jq program shared by next-task's blocker walk: given a candidate's
+# description_html (as $desc) and today's date (as $today, "YYYY-MM-DD"),
+# emit {pending: bool} — true when the description carries a
+# "Recheck-after: <YYYY-MM-DD>" convention whose date has not yet arrived.
+# Mirrors the "Blocked by:" convention above for periodic recheck tasks
+# (e.g. "did this outage recur?") that should not be re-picked until a given
+# date, without needing a human to manually requeue them or a separate
+# backlog follow-up task. Multiple occurrences: the last one wins, same
+# tail -1 convention used for the "Branch: <code>" tag. ISO dates compare
+# correctly as plain strings, so no date arithmetic is needed.
+_RECHECK_JQ='
+    ($desc | [scan("(?i)recheck[- ]after:?\\s*([0-9]{4}-[0-9]{2}-[0-9]{2})")] | last) as $date
+    | {pending: ($date != null and $date[0] > $today)}
+'
+
 # Fetch an issue by id and append its comments, as next-task/task-in-progress
 # both return it. Kept separate from cmd_get_issue so the two selection paths
 # stay one function call away from the exact response shape the loop injects.
@@ -516,23 +534,28 @@ cmd_next_task() {
     seq_to_state=$(jq -c '[.results[] | {(.sequence_id | tostring): .state}] | add // {}' "$issues_tmp")
     rm -f "$issues_tmp"
 
+    local today
+    today=$(date -u +%Y-%m-%d)
+
     # Walk candidates highest-priority-first, reading each one's description
-    # only until an unblocked one is found — the winner's description is needed
-    # for the response anyway, so nothing is fetched twice.
-    local id desc blocked
+    # only until an unblocked, un-rechecked one is found — the winner's
+    # description is needed for the response anyway, so nothing is fetched
+    # twice.
+    local id desc blocked recheck_pending
     while IFS= read -r id; do
         [ -n "$id" ] || continue
         desc=$(_get_desc "$pid" "$id")
         blocked=$(jq -n --arg desc "$desc" --argjson seqmap "$seq_to_state" \
             --argjson resolved "$resolved_ids" --argjson resolved_review "$resolved_review_ids" \
             "$_BLOCKER_JQ | .blocked")
-        if [ "$blocked" != "true" ]; then
-            _issue_with_comments "$pid" "$id"
-            return
-        fi
+        [ "$blocked" = "true" ] && continue
+        recheck_pending=$(jq -n --arg desc "$desc" --arg today "$today" "$_RECHECK_JQ | .pending")
+        [ "$recheck_pending" = "true" ] && continue
+        _issue_with_comments "$pid" "$id"
+        return
     done <<< "$candidate_ids"
 
-    echo '{"done": true, "message": "all candidate tasks are blocked by unresolved dependencies"}'
+    echo '{"done": true, "message": "all candidate tasks are blocked by unresolved dependencies or a pending recheck date"}'
     exit 0
 }
 
