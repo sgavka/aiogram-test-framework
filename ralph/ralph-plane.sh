@@ -276,16 +276,16 @@ load_env() {
     # CLI --model always wins over RALPH_MODEL, every reload.
     MODEL="${CLI_MODEL:-${RALPH_MODEL:-claude-opus-5}}"
     # Reasoning-effort level passed to every `claude` call (--effort). Default
-    # "high" regardless of whatever the CLI's own built-in default happens to
+    # "medium" regardless of whatever the CLI's own built-in default happens to
     # be, so behavior here doesn't silently drift across claude-code releases.
     # A task can override this per-iteration via "Effort: <level>" in its
     # description (see below) the same way "Model: <name>" does.
-    EFFORT="${RALPH_EFFORT:-high}"
+    EFFORT="${RALPH_EFFORT:-medium}"
     case "$EFFORT" in
         low|medium|high|xhigh|max) ;;
         *)
-            echo "WARNING: invalid RALPH_EFFORT \"$EFFORT\" (use low, medium, high, xhigh, or max) — falling back to high" >&2
-            EFFORT="high"
+            echo "WARNING: invalid RALPH_EFFORT \"$EFFORT\" (use low, medium, high, xhigh, or max) — falling back to medium" >&2
+            EFFORT="medium"
             ;;
     esac
 }
@@ -387,8 +387,16 @@ check_claude_limits() {
     # Strip ANSI escape codes before parsing (output differs in non-interactive mode)
     local clean
     clean=$(printf '%s' "$output" | sed 's/\x1b\[[0-9;]*m//g')
-    CLAUDE_SESSION_PCT=$(printf '%s' "$clean" | grep "Current session:" | sed -n 's/.*: \([0-9]*\)% used.*/\1/p')
-    CLAUDE_WEEK_PCT=$(printf '%s' "$clean" | grep "Current week (all models):" | sed -n 's/.*: \([0-9]*\)% used.*/\1/p')
+    # The `|| true` on each pipeline matters under `set -o pipefail`: grep exits 1
+    # when "Current session:"/"Current week (all models):" is not found (a
+    # transient `claude -p "/usage"` hiccup or output-format change), which would
+    # otherwise propagate through the pipe and, being an unguarded assignment,
+    # kill the whole loop under `set -e` (same bug class as cleanup_docker_containers,
+    # see v53 — this function used the same unguarded pattern and was never fixed).
+    # The existing ${CLAUDE_SESSION_PCT:-99}/${CLAUDE_WEEK_PCT:-99} fallback below
+    # already treats an empty match as "near limit", so this is a pure crash fix.
+    CLAUDE_SESSION_PCT=$(printf '%s' "$clean" | grep "Current session:" | sed -n 's/.*: \([0-9]*\)% used.*/\1/p') || true
+    CLAUDE_WEEK_PCT=$(printf '%s' "$clean" | grep "Current week (all models):" | sed -n 's/.*: \([0-9]*\)% used.*/\1/p') || true
     CLAUDE_SESSION_PCT="${CLAUDE_SESSION_PCT:-99}"
     CLAUDE_WEEK_PCT="${CLAUDE_WEEK_PCT:-99}"
 }
@@ -409,7 +417,7 @@ sweep_failed_tests() {
         id=$(echo "$review_json" | jq -r ".[$i].id")
         seq=$(echo "$review_json" | jq -r ".[$i].sequence_id // \"?\"")
         branch=$(echo "$review_json" | jq -r ".[$i].description_html // \"\"" \
-            | grep -oP '(?<=Branch: <code>)[^<]+' | tail -1 || echo "")
+            | grep -oP 'Branch: <code[^>]*>\K[^<]+' | tail -1 || echo "")
         [ -z "$branch" ] && continue
         status=$("$RALPH_DIR/github.sh" tests-status "$branch" 2>/dev/null || echo "NONE")
         if [ "$status" = "FAILURE" ]; then
@@ -447,7 +455,7 @@ sweep_merge_conflicts() {
         id=$(echo "$review_json" | jq -r ".[$i].id")
         seq=$(echo "$review_json" | jq -r ".[$i].sequence_id // \"?\"")
         branch=$(echo "$review_json" | jq -r ".[$i].description_html // \"\"" \
-            | grep -oP '(?<=Branch: <code>)[^<]+' | tail -1 || echo "")
+            | grep -oP 'Branch: <code[^>]*>\K[^<]+' | tail -1 || echo "")
         [ -z "$branch" ] && continue
         mergeable=$("$RALPH_DIR/github.sh" mergeable "$branch" 2>/dev/null || echo "NONE")
         if [ "$mergeable" = "CONFLICTING" ]; then
@@ -715,13 +723,22 @@ while true; do
     # is already assigned) so the agent does not have to fetch them itself every
     # iteration (formerly PLANE.md.tpl step 0.1's manual unresolved-threads call).
     TASK_BRANCH=$(echo "$TASK_JSON" | jq -r '.description_html // ""' \
-        | grep -oP '(?<=Branch: <code>)[^<]+' | tail -1 || echo "")
+        | grep -oP 'Branch: <code[^>]*>\K[^<]+' | tail -1 || echo "")
     PR_THREADS="[]"
     if [ -n "$TASK_BRANCH" ]; then
         PR_THREADS=$("$RALPH_DIR/github.sh" unresolved-threads "$TASK_BRANCH" 2>/dev/null || echo "[]")
         [ -z "$PR_THREADS" ] && PR_THREADS="[]"
     fi
-    TASK_JSON=$(echo "$TASK_JSON" | jq --argjson threads "$PR_THREADS" '. + {pr_unresolved_threads: $threads}')
+    # Route through a temp file, not --argjson: a PR with enough review
+    # comment volume pushes $PR_THREADS past Linux's 128KiB single-argv-string
+    # cap (MAX_ARG_STRLEN), which fails jq with "Argument list too long" and
+    # takes down the whole loop process, not just this iteration (see
+    # CLAUDE.md's plane.sh gotcha for the same class of bug, fixed there via
+    # _jq_with_desc/--rawfile).
+    PR_THREADS_FILE=$(mktemp)
+    printf '%s' "$PR_THREADS" > "$PR_THREADS_FILE"
+    TASK_JSON=$(echo "$TASK_JSON" | jq --slurpfile threads "$PR_THREADS_FILE" '. + {pr_unresolved_threads: $threads[0]}')
+    rm -f "$PR_THREADS_FILE"
 
     # Per-task model override: a task's description may contain "Model: <name>"
     # (short name like opus/sonnet/haiku/fable, or a full model id) to run just
@@ -1015,10 +1032,10 @@ while true; do
     # the API rejecting a request on rate-limit grounds — the subscription's
     # usage limit was hit mid-iteration, not caught by the pre-iteration
     # check_claude_limits gate above (which only checks before an iteration
-    # starts). Treated like TASK_BLOCKED (→ Todo, not Review) rather than the
-    # "no signal" fallback below, but additionally persists RUN_SESSION_ID so
-    # the next pickup resumes this exact Claude session (see
-    # ITER_RESUME_SESSION_ID/--resume above) instead of restarting cold.
+    # starts). Treated like TASK_BLOCKED (→ Todo, not Review), and (like the
+    # NO_SIGNAL case below) persists RUN_SESSION_ID so the next pickup resumes
+    # this exact Claude session (see ITER_RESUME_SESSION_ID/--resume above)
+    # instead of restarting cold.
     RATE_LIMITED=false
     if [ "$TASK_BLOCKED" = false ] && [ "$TASK_DONE_SIGNAL" = false ]; then
         if grep '^{' "$RAWFILE" 2>/dev/null | jq -e '
@@ -1026,6 +1043,31 @@ while true; do
         ' >/dev/null 2>&1; then
             RATE_LIMITED=true
         fi
+    fi
+
+    # True "no signal" fallback: neither promise fired, and not a rate-limit
+    # cutoff either — the claude subprocess's stdout pipe closed (it actually
+    # exited) without ever emitting TASK_DONE/TASK_BLOCKED. An earlier version
+    # of this fix tried to tell "aborted with nothing to review" apart from
+    # "aborted after work was already pushed" by re-fetching the description
+    # and checking for a Branch: tag, routing to Todo only when one was
+    # absent — but plenty of legitimate tasks never get a branch at all (see
+    # step 1: a task needing no repository changes skips branch/PR entirely
+    # and finishes via TASK_DONE alone), so "no branch" is not a reliable
+    # stand-in for "nothing happened" (operator feedback on this very task,
+    # #1556, live). Simpler and more robust: treat *every* true no-signal
+    # outcome the same way RATE_LIMITED already is — move to Todo and, if a
+    # session id was captured, persist it as Resume-Session so the next
+    # pickup reconnects to the exact same Claude conversation (--resume)
+    # instead of the loop trying to infer a finished/unfinished state from
+    # artifacts. This is what actually addresses task #1533's failure mode:
+    # the agent had backgrounded a test run and was mid-wait when the turn
+    # ended — resuming that same session lets it pick back up, check the
+    # real result, and finish properly (commit/push/create-pr/promise)
+    # instead of losing that context and starting cold.
+    NO_SIGNAL=false
+    if [ "$TASK_BLOCKED" = false ] && [ "$TASK_DONE_SIGNAL" = false ] && [ "$RATE_LIMITED" = false ]; then
+        NO_SIGNAL=true
     fi
 
     if [ -n "$TASK_ID" ]; then
@@ -1038,7 +1080,7 @@ while true; do
         fi
 
         NEXT_STATE_LABEL="Review"
-        if [ "$TASK_BLOCKED" = true ] || [ "$RATE_LIMITED" = true ]; then
+        if [ "$TASK_BLOCKED" = true ] || [ "$RATE_LIMITED" = true ] || [ "$NO_SIGNAL" = true ]; then
             NEXT_STATE_LABEL="Todo"
         fi
         printf "\033[90m[%s] Finishing task %s (→ %s)...\033[0m" "$(date +%H:%M:%S)" "$TASK_ID" "$NEXT_STATE_LABEL"
@@ -1070,8 +1112,16 @@ while true; do
                 ITER_COMMENT="${ITER_COMMENT}<p>⏱ Hit the Claude usage limit mid-iteration — moved back to Todo. No session id was captured to resume from, so the next pickup starts a fresh session.</p>"
             fi
         fi
+        if [ "$NO_SIGNAL" = true ]; then
+            if [ -n "$RUN_SESSION_ID" ]; then
+                printf '<p>Resume-Session: %s</p>' "$RUN_SESSION_ID" | "$RALPH_DIR/plane.sh" append-description "$TASK_ID" >/dev/null 2>&1 || true
+                ITER_COMMENT="${ITER_COMMENT}<p>⚠ Iteration ended with no TASK_DONE/TASK_BLOCKED signal — moved back to Todo; the next pickup will resume this exact Claude session (<code>${RUN_SESSION_ID}</code>) instead of starting cold, so it can pick back up (e.g. check on a backgrounded command it was mid-wait on) and finish properly. See the gist log above for what the agent was doing when it stopped.</p>"
+            else
+                ITER_COMMENT="${ITER_COMMENT}<p>⚠ Iteration ended with no TASK_DONE/TASK_BLOCKED signal and no session id was captured — moved back to Todo; the next pickup starts a fresh session. See the gist log above for what the agent was doing when it stopped.</p>"
+            fi
+        fi
         "$RALPH_DIR/plane.sh" add-comment "$TASK_ID" "$ITER_COMMENT" 2>/dev/null || true
-        if [ "$TASK_BLOCKED" = true ] || [ "$RATE_LIMITED" = true ]; then
+        if [ "$TASK_BLOCKED" = true ] || [ "$RATE_LIMITED" = true ] || [ "$NO_SIGNAL" = true ]; then
             "$RALPH_DIR/plane.sh" set-todo "$TASK_ID" 2>/dev/null || true
         else
             "$RALPH_DIR/plane.sh" set-review "$TASK_ID" 2>/dev/null || true
@@ -1106,6 +1156,13 @@ while true; do
         rm -f "$TMPFILE"
         echo ""
         echo -e "\033[90m[$(date +%H:%M:%S)]\033[0m \033[1;33m── Task ${TASK_ID} done. Starting fresh session (iteration $ITERATION) ──\033[0m"
+        echo ""
+        continue
+    fi
+    if [ "$NO_SIGNAL" = true ]; then
+        rm -f "$TMPFILE"
+        echo ""
+        echo -e "\033[90m[$(date +%H:%M:%S)]\033[0m \033[1;31m── Task ${TASK_ID} ended with no signal — moved back to Todo${RUN_SESSION_ID:+, will resume session ${RUN_SESSION_ID}}. Starting fresh session (iteration $ITERATION) ──\033[0m"
         echo ""
         continue
     fi
