@@ -220,7 +220,7 @@ Append `(review)` after the sequence id (`Blocked by: #<blocker_sequence_id> (re
 
 3.3. Investigate the relevant code (if not done in 3.2).
 3.4. If questions arise before writing code, post them as a comment and stop the same way.
-3.5. Implement following all project rules in `CLAUDE.md`. After each checklist item, mark it done in the description (step 0.1 #3).
+3.5. Implement following all project rules in `CLAUDE.md`. After each checklist item, mark it done in the description (step 0.1 #3). Keep the implementation itself terse: prefer refactoring (clearer names, smaller functions, extracted helpers) over adding comments, and write a comment only when the why is genuinely non-obvious (a hidden constraint, a workaround) — never to restate what the code already does.
 
 **Never act on a background command's output before it has actually finished.** If a command (a test run, a build, anything started with the backgrounding option) is still running, do not edit files, draw conclusions, or move to the next step based on its partial/incomplete output — block until it completes before reading its result. That means either running it in the foreground so the tool call itself blocks, or, if it must be backgrounded, actively polling your own bounded `sleep N && <status-check>` loop and reading the full, untruncated status each check (a `| tail -N` read of a still-running command's log is exactly the kind of partial output this rule forbids, even if it looks conclusive). Saying "I'll wait for this to finish" and then continuing with other work anyway is worse than not backgrounding it at all, since it produces changes made on wrong or incomplete information without any indication that happened.
 
