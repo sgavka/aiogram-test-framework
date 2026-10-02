@@ -124,7 +124,8 @@ BASE="https://$PLANE_HOST/api/v1/workspaces/$PLANE_USERNAME"
 # ---------------------------------------------------------------------------
 
 _curl() {
-    curl -sS --fail-with-body -H "X-API-Key: $PLANE_TOKEN" -H "Content-Type: application/json" "$@"
+    curl -sS --fail-with-body --retry 5 --retry-delay 5 \
+        -H "X-API-Key: $PLANE_TOKEN" -H "Content-Type: application/json" "$@"
 }
 
 # If $1 starts with "@", read and print the rest as a file path; otherwise
