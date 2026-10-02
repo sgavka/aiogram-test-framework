@@ -32,7 +32,7 @@ All Plane interactions go through `ralph/plane.sh` (run from repo root). **Comme
 ```bash
 ralph/plane.sh add-comment <id> "<html>"           # Post an HTML comment on the issue
 ralph/plane.sh get-comments <id>                    # List all comments [{id,body,created_at}]
-ralph/plane.sh get-issue <id>                       # Full issue JSON
+ralph/plane.sh get-issue <id>                       # Full issue JSON, including a custom_fields key
 ralph/plane.sh get-task <ref>                       # Look up an issue by human-readable ref (e.g. TM-808) instead of its internal id
 ralph/plane.sh list-labels                          # List this project's labels [{id,name}] — use to find a sibling project's exact label name for create-task; naming conventions vary per board, so always check here rather than guessing
 ralph/plane.sh update-description <id>              # Replace description_html (reads HTML from stdin)
@@ -46,6 +46,9 @@ ralph/plane.sh upload-asset <file> <id> [project_id]       # Upload an image/fil
 ralph/plane.sh download-asset <asset_id> <out_path> <id> [project_id] # Download an asset attached to the task, to view it
 ralph/plane.sh list-images <id>                    # JSON array of asset ids embedded in the task's description + comments
 ralph/plane.sh list-attachments <id>               # JSON array of the task's native file attachments (id, name, size, created_at) — NOT the same set as list-images
+ralph/plane.sh list-fields                          # This project's custom field definitions [{id,name,display_name,field_type,is_required,is_active,options:[{id,name}]}]
+ralph/plane.sh get-fields <id>                      # The custom field values a task holds (null for unset fields)
+ralph/plane.sh set-field <id> <field> <value>       # Set one custom field's value; <field> by name or id; <value> converted per field_type (quoted text/date/datetime, bare integer/float, select by option name or id, relation by work-item UUID, multi_relation as comma-separated UUIDs); "" clears it
 ```
 
 **Images in comments/descriptions.** Plane embeds uploaded images as `<image-component src="<asset_id>" width="35%" height="auto" alignment="left"></image-component>` — `src` is an asset UUID, not a literal URL.
