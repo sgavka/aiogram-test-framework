@@ -34,7 +34,7 @@
 #   docs/plane.sh review-done-in-period <from> [<to>]   — grouped text report of Done/Processing/Cancelled tasks updated within a range
 #   docs/plane.sh set-done <id>                          — move issue to Done (operator-triggered only)
 #   docs/plane.sh set-cancelled <id>                     — move issue to Cancelled (operator-triggered only)
-#   docs/plane.sh get-issue <id>                         — print full issue JSON
+#   docs/plane.sh get-issue <id>                         — print full issue JSON, including a custom_fields key (same shape as get-fields)
 #   docs/plane.sh get-task <PROJECT-123>                 — look up an issue by its human-readable ref (e.g. TM-808) and print full issue JSON + comments; this is the ONLY command that accepts a ref — every other command below (including every set-* one) needs the UUID from this call's .id field instead. Passing a ref to one of those is not an obvious error: it returns a 404 with an all-null-fields JSON body, not a clear "not found."
 #   docs/plane.sh list-states                            — print all project states
 #   docs/plane.sh list-labels                            — print all project labels [{id,name}] (e.g. to find a sibling project's label for create-task)
@@ -45,6 +45,11 @@
 #   docs/plane.sh list-attachments <issue_id>            — JSON array of the issue's native file attachments (id, name, size, created_at) — files added via
 #                                                          Plane's own "Attach" UI panel, e.g. a zip; NOT the same set as list-images, which only scans for
 #                                                          images embedded inline in description/comment HTML and never sees a non-embedded file
+#   docs/plane.sh list-fields                            — project's custom field definitions [{id,name,display_name,field_type,is_required,is_active,options:[{id,name}]}]
+#   docs/plane.sh get-fields <issue_id>                  — the custom field values an issue holds (null for unset fields)
+#   docs/plane.sh set-field <issue_id> <field> <value>   — set one custom field's value; <field> by name or id (resolved via list-fields); <value> converted
+#                                                          per the field's type (quoted for text/date/datetime, bare for integer/float, option name-or-id for
+#                                                          select, a work-item UUID for relation, comma-separated UUIDs for multi_relation); "" clears it
 #
 # All comment/description bodies sent to Plane must be HTML, not Markdown.
 #
@@ -294,6 +299,109 @@ _all_issues() {
     rm -f "$tmp"
 }
 
+# Same cursor-pagination approach as _all_issues, for the project's custom
+# field definitions (a small list in practice, but the endpoint follows the
+# same paginated .results/next_cursor shape as every other list endpoint on
+# this Plane version, so it gets the same treatment rather than assuming a
+# single page).
+_all_custom_fields() {
+    local pid="$1"
+    local per_page="${PLANE_PAGE_SIZE:-1000}"
+    local max_pages="${PLANE_MAX_PAGES:-20}"
+    local cursor="" url page pages=0
+    local tmp
+    tmp=$(mktemp)
+    while :; do
+        url="$BASE/projects/$pid/custom-fields/?per_page=${per_page}"
+        [ -n "$cursor" ] && url="${url}&cursor=${cursor}"
+        page=$(_curl "$url")
+        printf '%s\n' "$page" >> "$tmp"
+        pages=$((pages + 1))
+        [ "$(printf '%s' "$page" | jq -r '.next_page_results // false')" = "true" ] || break
+        cursor=$(printf '%s' "$page" | jq -r '.next_cursor // empty')
+        [ -n "$cursor" ] || break
+        if [ "$pages" -ge "$max_pages" ]; then
+            echo "WARNING: stopped after $pages pages (PLANE_MAX_PAGES=$max_pages) — some fields were not read" >&2
+            break
+        fi
+    done
+    jq -s '{results: (map(.results // []) | add // [])}' "$tmp"
+    rm -f "$tmp"
+}
+
+# Convert a set-field raw CLI value into the JSON value Plane's custom-field
+# values PATCH expects, per field_type. An empty raw value always clears the
+# field (JSON null), regardless of type. $options_json is the field's own
+# inlined `options` array (only meaningful for select).
+_convert_field_value() {
+    local ftype="$1" raw="$2" options_json="$3"
+
+    if [ -z "$raw" ]; then
+        echo null
+        return
+    fi
+
+    case "$ftype" in
+        text)
+            jq -n --arg v "$raw" '$v'
+            ;;
+        integer)
+            if [[ "$raw" =~ ^-?[0-9]+$ ]]; then
+                echo "$raw"
+            else
+                echo "ERROR: value \"$raw\" is not a whole number (field type: integer)" >&2
+                exit 1
+            fi
+            ;;
+        float)
+            if [[ "$raw" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+                echo "$raw"
+            else
+                echo "ERROR: value \"$raw\" is not a number (field type: float)" >&2
+                exit 1
+            fi
+            ;;
+        date)
+            if [[ "$raw" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+                jq -n --arg v "$raw" '$v'
+            else
+                echo "ERROR: value \"$raw\" is not YYYY-MM-DD (field type: date)" >&2
+                exit 1
+            fi
+            ;;
+        datetime)
+            jq -n --arg v "$raw" '$v'
+            ;;
+        select)
+            local opt_id
+            opt_id=$(echo "$options_json" | jq -r --arg v "$raw" '
+                [.[] | select(.is_active == true) |
+                    select(.id == $v or (.name | ascii_downcase) == ($v | ascii_downcase))] | .[0].id // empty
+            ')
+            if [ -z "$opt_id" ]; then
+                echo "ERROR: \"$raw\" is not an active option of this select field (run list-fields to see options)" >&2
+                exit 1
+            fi
+            jq -n --arg v "$opt_id" '$v'
+            ;;
+        relation)
+            if [[ "$raw" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+                jq -n --arg v "$raw" '$v'
+            else
+                echo "ERROR: value \"$raw\" is not a work item UUID (field type: relation)" >&2
+                exit 1
+            fi
+            ;;
+        multi_relation)
+            jq -n --arg csv "$raw" '[$csv | splits(",") | gsub("^\\s+|\\s+$"; "")]'
+            ;;
+        *)
+            echo "ERROR: unsupported field_type \"$ftype\"" >&2
+            exit 1
+            ;;
+    esac
+}
+
 # jq expression that strips noise keys from an issue object before returning it.
 # sequence_id is intentionally KEPT (used for branch names / PR bodies).
 _STRIP_NOISE='del(.point, .description_binary, .start_date, .target_date, .sort_order, .is_draft, .external_source, .external_id, .project, .workspace, .estimate_point, .description_text)'
@@ -346,7 +454,10 @@ cmd_get_issue() {
     local issue_id="$1"
     local pid
     pid=$(_project_id)
-    _curl "$BASE/projects/$pid/issues/$issue_id/" | jq "$_STRIP_NOISE"
+    local issue custom_fields
+    issue=$(_curl "$BASE/projects/$pid/issues/$issue_id/" | jq "$_STRIP_NOISE")
+    custom_fields=$(_curl "$BASE/projects/$pid/work-items/$issue_id/custom-field-values/" | jq '.')
+    jq -n --argjson issue "$issue" --argjson cf "$custom_fields" '$issue + {custom_fields: $cf}'
 }
 
 # Look up an issue by its human-readable ref (project identifier + sequence
@@ -747,6 +858,75 @@ cmd_set_priority() {
 
     _curl -X PATCH -d "{\"priority\": \"$priority\"}" \
         "$BASE/projects/$pid/issues/$issue_id/" | jq '{id, sequence_id, name, priority}'
+}
+
+# The project's custom field definitions, as [{id, name, display_name,
+# field_type, is_required, is_active, options: [{id, name}]}] — a real JSON
+# array (unlike list-states' bare object stream) so `jq -r '.[] | .name'`
+# works directly on the output.
+cmd_list_fields() {
+    local pid
+    pid=$(_project_id)
+    _all_custom_fields "$pid" | jq '[.results[] | {
+        id, name, display_name, field_type, is_required, is_active,
+        options: [.options[]? | {id, name}]
+    }]'
+}
+
+# The custom field values an issue currently holds — passed straight through
+# from the API (already a plain JSON array, one entry per project field, null
+# value when unset).
+cmd_get_fields() {
+    local issue_id="${1:?issue_id required}"
+    local pid
+    pid=$(_project_id)
+    _curl "$BASE/projects/$pid/work-items/$issue_id/custom-field-values/" | jq '.'
+}
+
+# Set one custom field's value on an issue. <field> is resolved by exact
+# case-insensitive name or by UUID (ambiguous/unknown is a loud error, same
+# style as _label_id_by_name) against list-fields; <value> is converted per
+# the resolved field's field_type (see _convert_field_value). An empty value
+# clears the field. Prints the API's response (the full values list) — on a
+# 400 (e.g. clearing an is_required field, or writing to an inactive one)
+# the error body still reaches stdout via jq before the pipeline's non-zero
+# exit propagates, same pattern as every other PATCH command here.
+cmd_set_field() {
+    local issue_id="${1:?issue_id required}"
+    local field="${2:?field name or id required}"
+    local raw_value="${3-}"
+    local pid
+    pid=$(_project_id)
+
+    local fields_json matches
+    fields_json=$(_all_custom_fields "$pid")
+    if [[ "$field" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+        matches=$(echo "$fields_json" | jq -c --arg id "$field" '[.results[] | select(.id == $id)]')
+    else
+        matches=$(echo "$fields_json" | jq -c --arg n "$field" '[.results[] | select((.name // "" | ascii_downcase) == ($n | ascii_downcase))]')
+    fi
+
+    local count
+    count=$(echo "$matches" | jq 'length')
+    if [ "$count" -eq 0 ]; then
+        echo "ERROR: no custom field matching \"$field\" (run list-fields to see available fields)" >&2
+        exit 1
+    elif [ "$count" -gt 1 ]; then
+        echo "ERROR: \"$field\" matches more than one custom field; use its id instead (run list-fields)" >&2
+        exit 1
+    fi
+
+    local field_obj field_id field_type options_json value_json payload
+    field_obj=$(echo "$matches" | jq -c '.[0]')
+    field_id=$(echo "$field_obj" | jq -r '.id')
+    field_type=$(echo "$field_obj" | jq -r '.field_type')
+    options_json=$(echo "$field_obj" | jq -c '.options // []')
+
+    value_json=$(_convert_field_value "$field_type" "$raw_value" "$options_json")
+    payload=$(jq -n --arg fid "$field_id" --argjson v "$value_json" '{values: {($fid): $v}}')
+
+    _curl -X PATCH -d "$payload" \
+        "$BASE/projects/$pid/work-items/$issue_id/custom-field-values/" | jq '.'
 }
 
 # List tasks currently in the Review state (filtered by PLANE_LABEL).
@@ -1608,9 +1788,12 @@ case "$CMD" in
     download-asset)   cmd_download_asset "${1:?asset_id required}" "${2:?output_path required}" "${3:?issue_id required}" "${4:-}" ;;
     list-images)      cmd_list_images "${1:?issue_id required}" ;;
     list-attachments) cmd_list_attachments "${1:?issue_id required}" ;;
+    list-fields)      cmd_list_fields ;;
+    get-fields)       cmd_get_fields "${1:?issue_id required}" ;;
+    set-field)        cmd_set_field "${1:?issue_id required}" "${2:?field name or id required}" "${3-}" ;;
     *)
         echo "Usage: $0 <command> [args]"
-        echo "Commands: next-task | task-in-progress | set-in-progress <id> | set-review <id> | set-todo <id> | set-label <id> <label> | set-priority <id> <priority> | list-review | list-blocked | set-done <id> | set-cancelled <id> | set-branch <id> <branch> | set-pr <id> <pr_url> | add-comment <id> <html> | get-comments <id> | update-description <id> | append-description <id> | prepend-description <id> | create-task <name> [desc] [priority] [backlog|todo|pre-ai] [label] [link_from_id] | task-url <id> | create-page <name> [desc_html|@file] | main-page [page_name] [env_key] | page-url <id> | get-page <id> [out_file] | edit-page <id> [name] [desc_html|@file] | rename-page <id> <name> | remove-page <id> | archive-page <id> | unarchive-page <id> | search-pages <query> | done-in-period <from> [<to>] | review-done-in-period <from> [<to>] | get-issue <id> | get-task <ref, e.g. TM-808> | list-states | list-labels | list-projects | upload-asset <file> <issue_id> [project_id] | download-asset <asset_id> <out_path> <issue_id> [project_id] | list-images <issue_id> | list-attachments <issue_id>"
+        echo "Commands: next-task | task-in-progress | set-in-progress <id> | set-review <id> | set-todo <id> | set-label <id> <label> | set-priority <id> <priority> | list-review | list-blocked | set-done <id> | set-cancelled <id> | set-branch <id> <branch> | set-pr <id> <pr_url> | add-comment <id> <html> | get-comments <id> | update-description <id> | append-description <id> | prepend-description <id> | create-task <name> [desc] [priority] [backlog|todo|pre-ai] [label] [link_from_id] | task-url <id> | create-page <name> [desc_html|@file] | main-page [page_name] [env_key] | page-url <id> | get-page <id> [out_file] | edit-page <id> [name] [desc_html|@file] | rename-page <id> <name> | remove-page <id> | archive-page <id> | unarchive-page <id> | search-pages <query> | done-in-period <from> [<to>] | review-done-in-period <from> [<to>] | get-issue <id> | get-task <ref, e.g. TM-808> | list-states | list-labels | list-projects | upload-asset <file> <issue_id> [project_id] | download-asset <asset_id> <out_path> <issue_id> [project_id] | list-images <issue_id> | list-attachments <issue_id> | list-fields | get-fields <issue_id> | set-field <issue_id> <field> <value>"
         exit 1
         ;;
 esac
