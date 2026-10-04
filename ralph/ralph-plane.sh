@@ -133,12 +133,23 @@ _task_id_of() { printf '%s' "$1" | jq -r '.id // ""' 2>/dev/null || echo ""; }
 # description as remove nothing.
 _clear_resume_marker() {
     local id="$1" desc
+    "$RALPH_DIR/plane.sh" set-field "$id" session_id "" >/dev/null 2>&1 || true
     desc=$("$RALPH_DIR/plane.sh" get-issue "$id" 2>/dev/null | jq -r '.description_html // ""')
     [ -z "$desc" ] && return 0
     if printf '%s' "$desc" | grep -q 'Resume-Session:'; then
         printf '%s' "$desc" | sed -E 's#<p>Resume-Session:[^<]*</p>##g' \
             | "$RALPH_DIR/plane.sh" update-description "$id" >/dev/null 2>&1 || true
     fi
+}
+
+# Record a captured Claude session id so the next pickup can --resume it: the
+# session_id custom field (read first on pickup, see TASK_FIELDS below) and the
+# Resume-Session description marker, kept as the fallback for when the field is
+# unset or cannot be written.
+_persist_resume_session() {
+    local id="$1" session="$2"
+    printf '<p>Resume-Session: %s</p>' "$session" | "$RALPH_DIR/plane.sh" append-description "$id" >/dev/null 2>&1 || true
+    "$RALPH_DIR/plane.sh" set-field "$id" session_id "$session" >/dev/null 2>&1 || true
 }
 
 # Optional per-project daily iteration cap (RALPH_MAX_ITERATIONS_PER_DAY).
@@ -542,8 +553,8 @@ mkdir -p "$LOGS_DIR"
 
 echo -e "\033[1;35m════════════════════════════════════════\033[0m"
 echo -e "\033[1;35m  Ralph (Plane.so)\033[0m"
-echo -e "\033[1;35m  Model: $MODEL (default -- a task can override via Model: <name> in its description)\033[0m"
-echo -e "\033[1;35m  Effort: $EFFORT (default -- a task can override via Effort: <level> in its description)\033[0m"
+echo -e "\033[1;35m  Model: $MODEL (default -- a task can override via its model custom field or a Model: <name> line in its description)\033[0m"
+echo -e "\033[1;35m  Effort: $EFFORT (default -- a task can override via its effort custom field or an Effort: <level> line in its description)\033[0m"
 echo -e "\033[1;35m  Continue mode: $CONTINUE_MODE\033[0m"
 echo -e "\033[1;35m  Prompt file: $PROMPT_FILE\033[0m"
 echo -e "\033[1;35m  Logs: $LOGS_DIR\033[0m"
@@ -740,12 +751,26 @@ while true; do
     TASK_JSON=$(echo "$TASK_JSON" | jq --slurpfile threads "$PR_THREADS_FILE" '. + {pr_unresolved_threads: $threads[0]}')
     rm -f "$PR_THREADS_FILE"
 
-    # Per-task model override: a task's description may contain "Model: <name>"
-    # (short name like opus/sonnet/haiku/fable, or a full model id) to run just
-    # this task on a different model than RALPH_MODEL — e.g. a cheap/simple
-    # follow-up task on haiku. Falls back to the configured default when absent.
-    TASK_MODEL_RAW=$(echo "$TASK_JSON" | jq -r '.description_html // ""' \
-        | grep -ioP '(?<=model:)[[:space:]]*\K[a-z0-9._-]+' | tail -1 || echo "")
+    # Per-task overrides from the Plane custom fields (model, effort,
+    # session_id). Read first; each one that is unset falls back to its
+    # description marker below. A failed lookup is logged and treated as "no
+    # fields set" so the task still runs on the description/default values.
+    TASK_FIELDS=$("$RALPH_DIR/plane.sh" task-overrides "$TASK_ID") || TASK_FIELDS=""
+    if ! _is_json "$TASK_FIELDS"; then
+        echo -e "\033[33m  could not read custom fields for task ${TASK_ID} — using description markers\033[0m"
+        TASK_FIELDS='{}'
+    fi
+
+    # Per-task model override: a task's model field (or, when unset, a
+    # "Model: <name>" line in its description) may name a model (short name
+    # like opus/sonnet/haiku/fable, or a full model id) to run just this task on
+    # a different model than RALPH_MODEL — e.g. a cheap/simple follow-up task on
+    # haiku. Falls back to the configured default when absent.
+    TASK_MODEL_RAW=$(jq -r '.model // ""' <<< "$TASK_FIELDS")
+    if [ -z "$TASK_MODEL_RAW" ]; then
+        TASK_MODEL_RAW=$(echo "$TASK_JSON" | jq -r '.description_html // ""' \
+            | grep -ioP '(?<=model:)[[:space:]]*\K[a-z0-9._-]+' | tail -1 || echo "")
+    fi
     ITER_MODEL="$MODEL"
     if [ -n "$TASK_MODEL_RAW" ]; then
         ITER_MODEL=$(resolve_model_alias "$TASK_MODEL_RAW")
@@ -757,8 +782,11 @@ while true; do
     # depth than RALPH_EFFORT — e.g. "Effort: low" on a small, well-specified
     # follow-up, or "Effort: xhigh" on a genuinely hard one. Falls back to the
     # configured default when absent or invalid.
-    TASK_EFFORT_RAW=$(echo "$TASK_JSON" | jq -r '.description_html // ""' \
-        | grep -ioP '(?<=effort:)[[:space:]]*\K[a-z]+' | tail -1 || echo "")
+    TASK_EFFORT_RAW=$(jq -r '.effort // ""' <<< "$TASK_FIELDS")
+    if [ -z "$TASK_EFFORT_RAW" ]; then
+        TASK_EFFORT_RAW=$(echo "$TASK_JSON" | jq -r '.description_html // ""' \
+            | grep -ioP '(?<=effort:)[[:space:]]*\K[a-z]+' | tail -1 || echo "")
+    fi
     ITER_EFFORT="$EFFORT"
     if [ -n "$TASK_EFFORT_RAW" ]; then
         case "${TASK_EFFORT_RAW,,}" in
@@ -772,9 +800,10 @@ while true; do
         esac
     fi
 
-    # Session-limit resume: a task's description may contain
-    # "Resume-Session: <uuid>", written by this script itself (see the
-    # rate-limit handling after the claude call below) when a previous
+    # Session-limit resume: a task's session_id custom field, or else a
+    # "Resume-Session: <uuid>" description marker, is written by this script
+    # itself (see _persist_resume_session and the rate-limit handling after the
+    # claude call below) when a previous
     # iteration was cut short by the Claude subscription's usage limit before
     # it could signal TASK_DONE/TASK_BLOCKED. When present, this iteration
     # runs `claude --resume <uuid>` instead of a fresh session, so the model
@@ -782,8 +811,15 @@ while true; do
     # mutually exclusive in practice with ITER_RESUME (task-in-progress crash
     # recovery) above, since a rate-limited task is moved to Todo, not left
     # In Progress.
-    ITER_RESUME_SESSION_ID=$(echo "$TASK_JSON" | jq -r '.description_html // ""' \
-        | grep -ioP '(?<=resume-session:)[[:space:]]*\K[0-9a-f-]{36}' | tail -1 || echo "")
+    ITER_RESUME_SESSION_ID=$(jq -r '.session_id // ""' <<< "$TASK_FIELDS")
+    if [ -n "$ITER_RESUME_SESSION_ID" ] && ! [[ "$ITER_RESUME_SESSION_ID" =~ ^[0-9a-f-]{36}$ ]]; then
+        echo -e "\033[33m  ignoring session_id field \"${ITER_RESUME_SESSION_ID}\" — not a session UUID\033[0m"
+        ITER_RESUME_SESSION_ID=""
+    fi
+    if [ -z "$ITER_RESUME_SESSION_ID" ]; then
+        ITER_RESUME_SESSION_ID=$(echo "$TASK_JSON" | jq -r '.description_html // ""' \
+            | grep -ioP '(?<=resume-session:)[[:space:]]*\K[0-9a-f-]{36}' | tail -1 || echo "")
+    fi
     if [ -n "$ITER_RESUME_SESSION_ID" ]; then
         echo -e "\033[90m  resuming Claude session: ${ITER_RESUME_SESSION_ID}\033[0m"
     fi
@@ -1100,13 +1136,13 @@ while true; do
         rm -f "$LOG_TXT"
 
         # Post stats (+ secret log link if the gist was created) and move the task.
-        ITER_COMMENT="<p><code>model=${ITER_MODEL}</code> <code>effort=${ITER_EFFORT}</code> <code>in=${ITER_IN_TOTAL}</code> <code>out=${ITER_OUT}</code> <code>turns=${ITER_TURNS}</code> <code>peak_ctx=${PEAK_CTX}/${ITER_CTX_WINDOW} (${PEAK_PCT}%)</code> <code>cost=\$${ITER_COST}</code> <code>elapsed=${ITER_ELAPSED_SECONDS}s</code></p>${ANALYSIS_HTML}"
+        ITER_COMMENT="<p><code>model=${ITER_MODEL}</code> <code>effort=${ITER_EFFORT}</code> <code>in=${ITER_IN_TOTAL}</code> <code>out=${ITER_OUT}</code> <code>turns=${ITER_TURNS}</code> <code>peak_ctx=${PEAK_CTX}/${ITER_CTX_WINDOW} (${PEAK_PCT}%)</code> <code>cost=\$${ITER_COST}</code> <code>elapsed=${ITER_ELAPSED_SECONDS}s</code> <code>session=${RUN_SESSION_ID:-none}</code></p>${ANALYSIS_HTML}"
         if [ -n "$GIST_URL" ]; then
             ITER_COMMENT="${ITER_COMMENT}<p>Ralph logs (secret gist): <a href=\"${GIST_URL}\">${GIST_URL}</a></p>"
         fi
         if [ "$RATE_LIMITED" = true ]; then
             if [ -n "$RUN_SESSION_ID" ]; then
-                printf '<p>Resume-Session: %s</p>' "$RUN_SESSION_ID" | "$RALPH_DIR/plane.sh" append-description "$TASK_ID" >/dev/null 2>&1 || true
+                _persist_resume_session "$TASK_ID" "$RUN_SESSION_ID"
                 ITER_COMMENT="${ITER_COMMENT}<p>⏱ Hit the Claude usage limit mid-iteration — moved back to Todo; the next pickup will resume this exact Claude session (<code>${RUN_SESSION_ID}</code>) instead of starting cold.</p>"
             else
                 ITER_COMMENT="${ITER_COMMENT}<p>⏱ Hit the Claude usage limit mid-iteration — moved back to Todo. No session id was captured to resume from, so the next pickup starts a fresh session.</p>"
@@ -1114,7 +1150,7 @@ while true; do
         fi
         if [ "$NO_SIGNAL" = true ]; then
             if [ -n "$RUN_SESSION_ID" ]; then
-                printf '<p>Resume-Session: %s</p>' "$RUN_SESSION_ID" | "$RALPH_DIR/plane.sh" append-description "$TASK_ID" >/dev/null 2>&1 || true
+                _persist_resume_session "$TASK_ID" "$RUN_SESSION_ID"
                 ITER_COMMENT="${ITER_COMMENT}<p>⚠ Iteration ended with no TASK_DONE/TASK_BLOCKED signal — moved back to Todo; the next pickup will resume this exact Claude session (<code>${RUN_SESSION_ID}</code>) instead of starting cold, so it can pick back up (e.g. check on a backgrounded command it was mid-wait on) and finish properly. See the gist log above for what the agent was doing when it stopped.</p>"
             else
                 ITER_COMMENT="${ITER_COMMENT}<p>⚠ Iteration ended with no TASK_DONE/TASK_BLOCKED signal and no session id was captured — moved back to Todo; the next pickup starts a fresh session. See the gist log above for what the agent was doing when it stopped.</p>"
