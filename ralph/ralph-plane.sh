@@ -149,6 +149,15 @@ _clear_resume_marker() {
 _persist_resume_session() {
     local id="$1" session="$2"
     printf '<p>Resume-Session: %s</p>' "$session" | "$RALPH_DIR/plane.sh" append-description "$id" >/dev/null 2>&1 || true
+    _record_session "$id" "$session"
+}
+
+# Write the session_id custom field for this run's Claude session, so it is
+# visible on the task itself and not only in the stats comment. Skipped when
+# the run captured no session id.
+_record_session() {
+    local id="$1" session="$2"
+    [ -n "$session" ] || return 0
     "$RALPH_DIR/plane.sh" set-field "$id" session_id "$session" >/dev/null 2>&1 || true
 }
 
@@ -755,9 +764,17 @@ while true; do
     # session_id). Read first; each one that is unset falls back to its
     # description marker below. A failed lookup is logged and treated as "no
     # fields set" so the task still runs on the description/default values.
-    TASK_FIELDS=$("$RALPH_DIR/plane.sh" task-overrides "$TASK_ID") || TASK_FIELDS=""
-    if ! _is_json "$TASK_FIELDS"; then
-        echo -e "\033[33m  could not read custom fields for task ${TASK_ID} — using description markers\033[0m"
+    # Plane rate-limits (HTTP 429) show up here as a failed read; retry before
+    # falling back, since a silent fallback runs the iteration on RALPH_MODEL/
+    # RALPH_EFFORT and ignores the task's model/effort fields entirely.
+    TASK_FIELDS=""
+    for _ in 1 2 3; do
+        TASK_FIELDS=$("$RALPH_DIR/plane.sh" task-overrides "$TASK_ID" 2>/dev/null) && _is_json "$TASK_FIELDS" && break
+        TASK_FIELDS=""
+        sleep "$RALPH_WAIT_INTERVAL"
+    done
+    if [ -z "$TASK_FIELDS" ]; then
+        echo -e "\033[31m  could not read custom fields for task ${TASK_ID} after 3 tries — using description markers and defaults\033[0m"
         TASK_FIELDS='{}'
     fi
 
@@ -811,14 +828,21 @@ while true; do
     # mutually exclusive in practice with ITER_RESUME (task-in-progress crash
     # recovery) above, since a rate-limited task is moved to Todo, not left
     # In Progress.
-    ITER_RESUME_SESSION_ID=$(jq -r '.session_id // ""' <<< "$TASK_FIELDS")
-    if [ -n "$ITER_RESUME_SESSION_ID" ] && ! [[ "$ITER_RESUME_SESSION_ID" =~ ^[0-9a-f-]{36}$ ]]; then
-        echo -e "\033[33m  ignoring session_id field \"${ITER_RESUME_SESSION_ID}\" — not a session UUID\033[0m"
-        ITER_RESUME_SESSION_ID=""
-    fi
-    if [ -z "$ITER_RESUME_SESSION_ID" ]; then
-        ITER_RESUME_SESSION_ID=$(echo "$TASK_JSON" | jq -r '.description_html // ""' \
-            | grep -ioP '(?<=resume-session:)[[:space:]]*\K[0-9a-f-]{36}' | tail -1 || echo "")
+    # The session_id field is also written after every iteration as a plain
+    # record of the last run's session (see _record_session), so it is only a
+    # resume source when the Resume-Session marker says the last run was cut
+    # short — otherwise a finished task re-picked after a test failure would
+    # resume a whole old conversation.
+    RESUME_MARKER_SESSION=$(echo "$TASK_JSON" | jq -r '.description_html // ""' \
+        | grep -ioP '(?<=resume-session:)[[:space:]]*\K[0-9a-f-]{36}' | tail -1 || echo "")
+    ITER_RESUME_SESSION_ID=""
+    if [ -n "$RESUME_MARKER_SESSION" ]; then
+        ITER_RESUME_SESSION_ID=$(jq -r '.session_id // ""' <<< "$TASK_FIELDS")
+        if [ -n "$ITER_RESUME_SESSION_ID" ] && ! [[ "$ITER_RESUME_SESSION_ID" =~ ^[0-9a-f-]{36}$ ]]; then
+            echo -e "\033[33m  ignoring session_id field \"${ITER_RESUME_SESSION_ID}\" — not a session UUID\033[0m"
+            ITER_RESUME_SESSION_ID=""
+        fi
+        [ -z "$ITER_RESUME_SESSION_ID" ] && ITER_RESUME_SESSION_ID="$RESUME_MARKER_SESSION"
     fi
     if [ -n "$ITER_RESUME_SESSION_ID" ]; then
         echo -e "\033[90m  resuming Claude session: ${ITER_RESUME_SESSION_ID}\033[0m"
@@ -1114,6 +1138,7 @@ while true; do
         if [ -n "$ITER_RESUME_SESSION_ID" ]; then
             _clear_resume_marker "$TASK_ID"
         fi
+        _record_session "$TASK_ID" "$RUN_SESSION_ID"
 
         NEXT_STATE_LABEL="Review"
         if [ "$TASK_BLOCKED" = true ] || [ "$RATE_LIMITED" = true ] || [ "$NO_SIGNAL" = true ]; then
