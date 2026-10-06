@@ -131,14 +131,27 @@ _task_id_of() { printf '%s' "$1" | jq -r '.id // ""' 2>/dev/null || echo ""; }
 # reliably newline-delimited — it can arrive as one long line — so removing
 # "the line containing it" could just as easily remove the entire
 # description as remove nothing.
+# Failures are logged, not swallowed: a Plane 429 here used to leave the marker
+# behind with no trace, and the next pickup silently resumed the old session.
+# Returns non-zero on failure; callers guard it (set -e).
 _clear_resume_marker() {
-    local id="$1" desc
+    local id="$1" issue desc attempt
     "$RALPH_DIR/plane.sh" set-field "$id" session_id "" >/dev/null 2>&1 || true
-    desc=$("$RALPH_DIR/plane.sh" get-issue "$id" 2>/dev/null | jq -r '.description_html // ""')
-    [ -z "$desc" ] && return 0
-    if printf '%s' "$desc" | grep -q 'Resume-Session:'; then
-        printf '%s' "$desc" | sed -E 's#<p>Resume-Session:[^<]*</p>##g' \
-            | "$RALPH_DIR/plane.sh" update-description "$id" >/dev/null 2>&1 || true
+    for attempt in 1 2 3; do
+        issue=$("$RALPH_DIR/plane.sh" get-issue "$id" 2>/dev/null) && _is_json "$issue" && break
+        issue=""
+        sleep 10
+    done
+    if [ -z "$issue" ]; then
+        echo "  could not re-read task $id to clear its Resume-Session marker (3 tries)" >&2
+        return 1
+    fi
+    desc=$(printf '%s' "$issue" | jq -r '.description_html // ""')
+    printf '%s' "$desc" | grep -q 'Resume-Session:' || return 0
+    if ! printf '%s' "$desc" | sed -E 's#<p>Resume-Session:[^<]*</p>##g' \
+        | "$RALPH_DIR/plane.sh" update-description "$id" >/dev/null 2>&1; then
+        echo "  could not write task $id's description to clear its Resume-Session marker" >&2
+        return 1
     fi
 }
 
@@ -1131,13 +1144,11 @@ while true; do
     fi
 
     if [ -n "$TASK_ID" ]; then
-        # This run itself was resuming a previously rate-limited session —
-        # clear that marker now regardless of this run's own outcome (done,
-        # blocked, or rate-limited again). A fresh marker is appended below
-        # if this run also ends up rate-limited.
-        if [ -n "$ITER_RESUME_SESSION_ID" ]; then
-            _clear_resume_marker "$TASK_ID"
-        fi
+        # Clear any Resume-Session marker left by an earlier iteration, whatever
+        # this run's own outcome (done, blocked, or no-signal again). Not only
+        # when this run was itself resuming: a marker can survive a run that
+        # never resumed. A fresh marker is appended below if this run needs one.
+        _clear_resume_marker "$TASK_ID" || true
         _record_session "$TASK_ID" "$RUN_SESSION_ID"
 
         NEXT_STATE_LABEL="Review"
