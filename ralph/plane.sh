@@ -2,7 +2,7 @@
 # Plane.so API helper for the ralph-plane.sh workflow.
 #
 # Usage (run from repo root):
-#   docs/plane.sh next-task                              — highest-priority Todo task + its comments (filtered by PLANE_LABEL); also skips a candidate whose description carries an unreached "Recheck-after: <YYYY-MM-DD>[THH:MM]" date/time (see PLANE_RESPECT_BLOCKERS below — same gate, same per-candidate description fetch)
+#   docs/plane.sh next-task                              — highest-priority Todo task + its comments (filtered by PLANE_LABEL); also skips a candidate whose re_check_after custom field (or, when that is unset, an unreached "Recheck-after: <YYYY-MM-DD>[THH:MM]" line in its description) holds a date/time still in the future (see PLANE_RESPECT_BLOCKERS below — same gate, same per-candidate description fetch)
 #   docs/plane.sh set-in-progress <id>                   — move issue to "In Progress" state (automation-internal)
 #   docs/plane.sh set-review <id>                        — move issue to "Review" state (automation-internal)
 #   docs/plane.sh set-todo <id>                          — move issue back to "Todo" state (automation-internal)
@@ -10,7 +10,7 @@
 #   docs/plane.sh set-priority <id> <priority>            — change an existing issue's priority (urgent|high|medium|low|none) — e.g. an operator bumping a task via Telegram's /setpriority
 #   docs/plane.sh list-review                            — Review-state tasks [{id,sequence_id,name,description_html}]
 #   docs/plane.sh list-blocked                           — Todo tasks held back by an unresolved "Blocked by: #<seq>" reference, with each blocker's sequence_id/name/state/url and whether it is a plain (Done) or "(review)" gate; each blocked task also carries its own url. The read-only counterpart to next-task's blocker gate; evaluates blockers regardless of PLANE_RESPECT_BLOCKERS
-#   docs/plane.sh add-comment <id> <html>                — post a comment on an issue (body must be HTML)
+#   docs/plane.sh add-comment <id> [html]                — post a comment on an issue (body must be HTML; read from stdin if omitted)
 #   docs/plane.sh get-comments <id>                      — list all comments on an issue as JSON
 #   docs/plane.sh update-description <id>                — replace description_html (reads new HTML from stdin)
 #   docs/plane.sh append-description <id>                — append HTML to the end of description_html (reads from stdin)
@@ -47,6 +47,7 @@
 #                                                          images embedded inline in description/comment HTML and never sees a non-embedded file
 #   docs/plane.sh list-fields                            — project's custom field definitions [{id,name,display_name,field_type,is_required,is_active,options:[{id,name}]}]
 #   docs/plane.sh get-fields <issue_id>                  — the custom field values an issue holds (null for unset fields)
+#   docs/plane.sh task-overrides <issue_id>              — {model, effort, session_id, re_check_after} from the custom fields (null when unset); what ralph reads before falling back to the Model:/Effort:/Resume-Session:/Recheck-after: description markers
 #   docs/plane.sh set-field <issue_id> <field> <value>   — set one custom field's value; <field> by name or id (resolved via list-fields); <value> converted
 #                                                          per the field's type (quoted for text/date/datetime, bare for integer/float, option name-or-id for
 #                                                          select, a work-item UUID for relation, comma-separated UUIDs for multi_relation); "" clears it
@@ -88,8 +89,9 @@
 #                   PLANE_RESPECT_BLOCKERS  (1 to skip next-task candidates blocked by an unresolved "Blocked by: #<seq>" reference;
 #                                            add "(review)" — e.g. "Blocked by: #<seq> (review)" — to resolve as soon as the
 #                                            blocker reaches a Review-named state instead of waiting for Done/Cancelled. Also
-#                                            gates the "Recheck-after: <YYYY-MM-DD>[THH:MM]" convention — a candidate carrying an
-#                                            unreached future date/time in its description is skipped the same way, for a periodic
+#                                            gates the "Recheck-after: <YYYY-MM-DD>[THH:MM]" convention — a candidate whose
+#                                            re_check_after field (or, when unset, its description) holds an unreached future
+#                                            date/time is skipped the same way, for a periodic
 #                                            recheck task that should not be picked again until that date/time arrives; the time
 #                                            part is optional and lets a short recheck (e.g. "in 30 minutes") resolve same-day
 #                                            instead of only at day granularity)
@@ -264,18 +266,29 @@ _label_id_by_name() {
 #     `next_cursor` string the response carries (e.g. "500:1:0"), fed back as
 #     `?cursor=`; `next_page_results` says whether another page exists.
 #
-#   - There is NO server-side filtering. `state=`, `labels=` and `state__id=`
-#     are all silently accepted and ignored (`total_count` stays at the full
-#     project count), so state/label filtering has to remain client-side —
-#     do not "optimise" a caller by moving its jq `select` into the query
-#     string. What the API *does* honour is `fields=`, a server-side
-#     projection, and that is the whole reason full pagination is affordable:
+#   - `state=`, `labels=` and `state__id=` are silently ignored (`total_count`
+#     stays at the full project count). The working filters are
+#     `state_id__in=<csv>` and `label_id__in=<id>` (verified live 2026-10-06:
+#     `total_count` drops to the filtered count and the cursor still paginates).
+#     Callers pass them via `_all_issues`' third argument (see `_issue_filter`)
+#     and keep their jq `select` as a guard, so a Plane that ignored them would
+#     only cost bandwidth, not correctness. What the API *also* honours is
+#     `fields=`, a server-side projection, and that is the whole reason full
+#     pagination is affordable:
 #     dropping `description_html` alone takes a 500-row page from 3.8 MB /21s
 #     to 130 KB /12s, so reading all 1393 rows costs about 30s in total
 #     instead of the ~90s the fat projection would have needed. It also makes
 #     a Cloudflare 524 on the call much less likely (see v64).
+# $3 = optional extra query fragment without a leading "&" (see _issue_filter).
+_issue_filter() {
+    local state_ids="$1" label_id="$2"
+    local q="state_id__in=${state_ids}"
+    [ -n "$label_id" ] && q="${q}&label_id__in=${label_id}"
+    printf '%s' "$q"
+}
+
 _all_issues() {
-    local pid="$1" fields="$2"
+    local pid="$1" fields="$2" filter="${3:-}"
     local per_page="${PLANE_PAGE_SIZE:-1000}"
     local max_pages="${PLANE_MAX_PAGES:-20}"
     local cursor="" url page pages=0
@@ -283,6 +296,7 @@ _all_issues() {
     tmp=$(mktemp)
     while :; do
         url="$BASE/projects/$pid/issues/?per_page=${per_page}&fields=${fields}"
+        [ -n "$filter" ] && url="${url}&${filter}"
         [ -n "$cursor" ] && url="${url}&cursor=${cursor}"
         page=$(_curl "$url")
         printf '%s\n' "$page" >> "$tmp"
@@ -314,7 +328,7 @@ _all_custom_fields() {
     while :; do
         url="$BASE/projects/$pid/custom-fields/?per_page=${per_page}"
         [ -n "$cursor" ] && url="${url}&cursor=${cursor}"
-        page=$(_curl "$url")
+        page=$(_curl "$url") || { rm -f "$tmp"; return 1; }
         printf '%s\n' "$page" >> "$tmp"
         pages=$((pages + 1))
         [ "$(printf '%s' "$page" | jq -r '.next_page_results // false')" = "true" ] || break
@@ -370,7 +384,13 @@ _convert_field_value() {
             fi
             ;;
         datetime)
-            jq -n --arg v "$raw" '$v'
+            # A value with no offset is Kyiv wall time (the Recheck-after convention),
+            # not UTC — convert it so the stored instant matches what the operator meant.
+            if [[ "$raw" =~ (Z|[+-][0-9]{2}:?[0-9]{2})$ ]]; then
+                jq -n --arg v "$raw" '$v'
+            else
+                jq -n --arg v "$(date -u -d "TZ=\"Europe/Kyiv\" $raw" +%Y-%m-%dT%H:%M:%SZ)" '$v'
+            fi
             ;;
         select)
             local opt_id
@@ -559,7 +579,8 @@ _BLOCKER_JQ='
 
 # jq program shared by next-task's blocker walk: given a candidate's
 # description_html (as $desc) and the current moment (as $today,
-# "YYYY-MM-DDTHH:MM"), emit {pending: bool} — true when the description
+# "YYYY-MM-DDTHH:MM", Kyiv local like the Recheck-after value it is compared
+# with), emit {pending: bool} — true when the description
 # carries a "Recheck-after: <YYYY-MM-DD>" or "Recheck-after:
 # <YYYY-MM-DD>T<HH:MM>" convention whose date/time has not yet arrived. The
 # time part is optional so a bare date still means "any time that day" — a
@@ -586,9 +607,16 @@ _RECHECK_JQ='
 # Fetch an issue by id and append its comments, as next-task/task-in-progress
 # both return it. Kept separate from cmd_get_issue so the two selection paths
 # stay one function call away from the exact response shape the loop injects.
+#
+# Comments go through a temp file + --rawfile/fromjson, not --argjson on the
+# command line, for the same MAX_ARG_STRLEN reason as _jq_with_desc above —
+# a task with a long PR-review-comment history can carry well over 128 KiB
+# of comments (confirmed live, Plane task #2479: 336 KiB on a single issue),
+# which made plain `--argjson comments "$comments"` fail with "Argument list
+# too long" and next-task return nothing at all for that issue.
 _issue_with_comments() {
     local pid="$1" issue_id="$2"
-    local comments
+    local comments comments_tmp
     comments=$(_curl "$BASE/projects/$pid/issues/$issue_id/comments/" \
         | jq '[.results[] | {
             id,
@@ -597,9 +625,50 @@ _issue_with_comments() {
             created_at
         }] | sort_by(.created_at)')
 
+    comments_tmp=$(mktemp)
+    trap 'rm -f "$comments_tmp"' RETURN
+    printf '%s' "$comments" > "$comments_tmp"
     _curl "$BASE/projects/$pid/issues/$issue_id/" | jq \
-        --argjson comments "$comments" \
-        ". + {comments: \$comments} | $_STRIP_NOISE"
+        --rawfile comments_raw "$comments_tmp" \
+        ". + {comments: (\$comments_raw | fromjson)} | $_STRIP_NOISE"
+}
+
+# The per-task overrides Plane custom fields can carry, read by ralph and by
+# next-task's recheck gate: {model, effort, session_id, re_check_after}. A
+# field that is unset comes back null, so each caller falls back to the old
+# description marker ("Model:", "Effort:", "Resume-Session:", "Recheck-after:")
+# when it is null. select values are resolved to option names; re_check_after
+# is normalized to the same Kyiv-local "YYYY-MM-DDTHH:MM" form the description
+# convention uses, so the two compare identically. Exits non-zero on a failed
+# lookup rather than returning all-null — a failed read must not look like an
+# empty answer (same rule as next-task's lookups).
+_task_overrides() {
+    local pid="$1" issue_id="$2"
+    local values fields='{"results":[]}' out recheck_raw normalized
+    values=$(_curl "$BASE/projects/$pid/work-items/$issue_id/custom-field-values/") || return 1
+    if printf '%s' "$values" | jq -e 'any(.[]; .field_type == "select" and .value != null)' >/dev/null; then
+        fields=$(_all_custom_fields "$pid") || return 1
+    fi
+    out=$(printf '%s' "$values" | jq -c --argjson fields "$fields" '
+        def val($n): ([.[] | select(.name == $n)][0]) as $f
+            | if $f == null or $f.value == null then null
+              elif $f.field_type == "select" then ($fields.results[] | select(.id == $f.custom_field) | .options[] | select(.id == $f.value) | .name) // null
+              else $f.value end;
+        {model: val("model"), effort: val("effort"), session_id: val("session_id"), re_check_after: val("re_check_after")}
+    ') || return 1
+    recheck_raw=$(jq -r '.re_check_after // ""' <<< "$out")
+    if [ -n "$recheck_raw" ]; then
+        normalized=$(TZ=Europe/Kyiv date -d "$recheck_raw" +%Y-%m-%dT%H:%M) || return 1
+        out=$(jq -c --arg r "$normalized" '.re_check_after = $r' <<< "$out")
+    fi
+    printf '%s\n' "$out"
+}
+
+cmd_task_overrides() {
+    local issue_id="$1"
+    local pid
+    pid=$(_project_id)
+    _task_overrides "$pid" "$issue_id"
 }
 
 cmd_next_task() {
@@ -626,9 +695,9 @@ cmd_next_task() {
     # 524s). It is read per candidate below, and only until one is pickable.
     local issues_tmp
     issues_tmp=$(mktemp)
-    _all_issues "$pid" "id,sequence_id,state,labels,priority" > "$issues_tmp"
+    _all_issues "$pid" "id,sequence_id,state,labels,priority" "$(_issue_filter "$todo_ids" "$label_id")" > "$issues_tmp"
 
-    # Filter to todo states + optional label, sort by priority
+    # Filter to todo states + optional label (server already narrowed; jq is the guard), sort by priority
     local priority_order='{"urgent":0,"high":1,"medium":2,"low":3,"none":4}'
     local candidate_ids
     candidate_ids=$(jq -r --argjson order "$priority_order" --arg ids "$todo_ids" --arg lbl "$label_id" '
@@ -653,20 +722,38 @@ cmd_next_task() {
         return
     fi
 
-    local resolved_ids resolved_review_ids seq_to_state
+    local resolved_ids resolved_review_ids
     resolved_ids=$(echo "$states" | jq -c '[.results[] | select(.group == "completed" or .group == "cancelled") | .id]')
     resolved_review_ids=$(echo "$states" | jq -c '[.results[] | select(.group == "completed" or .group == "cancelled" or (.name | test("review"; "i"))) | .id]')
-    seq_to_state=$(jq -c '[.results[] | {(.sequence_id | tostring): .state}] | add // {}' "$issues_tmp")
     rm -f "$issues_tmp"
 
+    # The seqmap for resolving "Blocked by: #<seq>" references must see every
+    # issue's state project-wide, not just the Todo-state/label-matching
+    # candidates fetched above for candidate_ids — a real blocker is almost
+    # always sitting in Backlog, In Progress, Review or Done, never Todo, so
+    # building this map from the Todo-scoped fetch made every live blocker
+    # invisible to it, and _BLOCKER_JQ's "reference not found -> fails open"
+    # branch (meant for a stale/typo'd sequence id) silently treated every
+    # real blocker the same way. Confirmed live (task #2479): a medium-priority
+    # task blocked on a Backlog item was wrongly picked over an eligible
+    # lower-priority task because of exactly this. Mirrors list-blocked's
+    # existing unfiltered seqmap fetch below, kept lean (state only, no
+    # labels/priority/description) since this runs on every next-task call.
+    local seqmap_tmp seq_to_state
+    seqmap_tmp=$(mktemp)
+    _all_issues "$pid" "id,sequence_id,state" > "$seqmap_tmp"
+    seq_to_state=$(jq -c '[.results[] | {(.sequence_id | tostring): .state}] | add // {}' "$seqmap_tmp")
+    rm -f "$seqmap_tmp"
+
     local today
-    today=$(date -u +%Y-%m-%dT%H:%M)
+    # Kyiv wall time, same clock the Recheck-after: description convention is written in.
+    today=$(TZ=Europe/Kyiv date +%Y-%m-%dT%H:%M)
 
     # Walk candidates highest-priority-first, reading each one's description
     # only until an unblocked, un-rechecked one is found — the winner's
     # description is needed for the response anyway, so nothing is fetched
     # twice.
-    local id desc blocked recheck_pending
+    local id desc blocked overrides recheck_at recheck_pending
     while IFS= read -r id; do
         [ -n "$id" ] || continue
         desc=$(_get_desc "$pid" "$id")
@@ -674,8 +761,14 @@ cmd_next_task() {
             --argjson resolved "$resolved_ids" --argjson resolved_review "$resolved_review_ids" \
             "$_BLOCKER_JQ | .blocked")
         [ "$blocked" = "true" ] && continue
-        recheck_pending=$(jq -n --arg desc "$desc" --arg today "$today" "$_RECHECK_JQ | .pending")
-        [ "$recheck_pending" = "true" ] && continue
+        overrides=$(_task_overrides "$pid" "$id") || exit 1
+        recheck_at=$(jq -r '.re_check_after // ""' <<< "$overrides")
+        if [ -n "$recheck_at" ]; then
+            if [[ "$recheck_at" > "$today" ]]; then continue; fi
+        else
+            recheck_pending=$(jq -n --arg desc "$desc" --arg today "$today" "$_RECHECK_JQ | .pending")
+            if [ "$recheck_pending" = "true" ]; then continue; fi
+        fi
         _issue_with_comments "$pid" "$id"
         return
     done <<< "$candidate_ids"
@@ -963,7 +1056,7 @@ cmd_list_review() {
     # ralph-plane.sh runs it once per iteration in sweep_failed_tests.
     local issues_tmp
     issues_tmp=$(mktemp)
-    _all_issues "$pid" "id,sequence_id,name,state,labels" > "$issues_tmp"
+    _all_issues "$pid" "id,sequence_id,name,state,labels" "$(_issue_filter "$state_id" "$label_id")" > "$issues_tmp"
 
     local rows
     rows=$(jq -r --arg state "$state_id" --arg lbl "$label_id" '
@@ -1022,10 +1115,16 @@ cmd_set_pr() {
 }
 
 # Post a comment. The body must be HTML (a tag-less string is wrapped in <p>).
+# Takes it as an argument, or from stdin when no argument is given (matches the
+# description commands, which always read stdin).
 cmd_add_comment() {
     local issue_id="$1"
-    local comment="$2"
+    local comment="${2-}"
     local pid
+    if [ -z "$comment" ] && [ ! -t 0 ]; then
+        comment=$(cat)
+    fi
+    [ -n "$comment" ] || { echo "add-comment: comment required (argument or stdin)" >&2; return 1; }
     pid=$(_project_id)
 
     _post_comment "$pid" "$issue_id" "$comment"
@@ -1103,7 +1202,7 @@ cmd_task_in_progress() {
 
     local issues_tmp
     issues_tmp=$(mktemp)
-    _all_issues "$pid" "id,sequence_id,state,labels,updated_at" > "$issues_tmp"
+    _all_issues "$pid" "id,sequence_id,state,labels,updated_at" "$(_issue_filter "$state_id" "$label_id")" > "$issues_tmp"
 
     local next
     next=$(jq --arg state "$state_id" --arg lbl "$label_id" '
@@ -1760,7 +1859,7 @@ case "$CMD" in
     set-cancelled)       cmd_set_cancelled "${1:?issue_id required}" ;;
     set-branch)          cmd_set_branch "${1:?issue_id required}" "${2:?branch required}" ;;
     set-pr)              cmd_set_pr "${1:?issue_id required}" "${2:?pr_url required}" ;;
-    add-comment)         cmd_add_comment "${1:?issue_id required}" "${2:?comment required}" ;;
+    add-comment)         cmd_add_comment "${1:?issue_id required}" "${2-}" ;;
     get-comments)        cmd_get_comments "${1:?issue_id required}" ;;
     update-description)  cmd_update_description "${1:?issue_id required}" ;;
     append-description)  cmd_append_description "${1:?issue_id required}" ;;
@@ -1790,10 +1889,11 @@ case "$CMD" in
     list-attachments) cmd_list_attachments "${1:?issue_id required}" ;;
     list-fields)      cmd_list_fields ;;
     get-fields)       cmd_get_fields "${1:?issue_id required}" ;;
+    task-overrides)   cmd_task_overrides "${1:?issue_id required}" ;;
     set-field)        cmd_set_field "${1:?issue_id required}" "${2:?field name or id required}" "${3-}" ;;
     *)
         echo "Usage: $0 <command> [args]"
-        echo "Commands: next-task | task-in-progress | set-in-progress <id> | set-review <id> | set-todo <id> | set-label <id> <label> | set-priority <id> <priority> | list-review | list-blocked | set-done <id> | set-cancelled <id> | set-branch <id> <branch> | set-pr <id> <pr_url> | add-comment <id> <html> | get-comments <id> | update-description <id> | append-description <id> | prepend-description <id> | create-task <name> [desc] [priority] [backlog|todo|pre-ai] [label] [link_from_id] | task-url <id> | create-page <name> [desc_html|@file] | main-page [page_name] [env_key] | page-url <id> | get-page <id> [out_file] | edit-page <id> [name] [desc_html|@file] | rename-page <id> <name> | remove-page <id> | archive-page <id> | unarchive-page <id> | search-pages <query> | done-in-period <from> [<to>] | review-done-in-period <from> [<to>] | get-issue <id> | get-task <ref, e.g. TM-808> | list-states | list-labels | list-projects | upload-asset <file> <issue_id> [project_id] | download-asset <asset_id> <out_path> <issue_id> [project_id] | list-images <issue_id> | list-attachments <issue_id> | list-fields | get-fields <issue_id> | set-field <issue_id> <field> <value>"
+        echo "Commands: next-task | task-in-progress | set-in-progress <id> | set-review <id> | set-todo <id> | set-label <id> <label> | set-priority <id> <priority> | list-review | list-blocked | set-done <id> | set-cancelled <id> | set-branch <id> <branch> | set-pr <id> <pr_url> | add-comment <id> <html> | get-comments <id> | update-description <id> | append-description <id> | prepend-description <id> | create-task <name> [desc] [priority] [backlog|todo|pre-ai] [label] [link_from_id] | task-url <id> | create-page <name> [desc_html|@file] | main-page [page_name] [env_key] | page-url <id> | get-page <id> [out_file] | edit-page <id> [name] [desc_html|@file] | rename-page <id> <name> | remove-page <id> | archive-page <id> | unarchive-page <id> | search-pages <query> | done-in-period <from> [<to>] | review-done-in-period <from> [<to>] | get-issue <id> | get-task <ref, e.g. TM-808> | list-states | list-labels | list-projects | upload-asset <file> <issue_id> [project_id] | download-asset <asset_id> <out_path> <issue_id> [project_id] | list-images <issue_id> | list-attachments <issue_id> | list-fields | get-fields <issue_id> | task-overrides <issue_id> | set-field <issue_id> <field> <value>"
         exit 1
         ;;
 esac

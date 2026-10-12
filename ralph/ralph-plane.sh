@@ -1003,6 +1003,25 @@ while true; do
     # not just "result") — captured unconditionally so the rate-limit
     # handling below can persist it if this run itself gets cut short.
     RUN_SESSION_ID=$(grep '^{' "$RAWFILE" 2>/dev/null | jq -r 'select(.session_id != null) | .session_id' 2>/dev/null | tail -1 || echo "")
+
+    # If this run was itself a --resume attempt and Claude could not find that
+    # session (expired/pruned/never existed), the stream-json "result" event
+    # is an immediate error_during_execution with num_turns=0 and the SAME
+    # session id we asked it to resume, not a new one. Treating that like an
+    # ordinary no-signal cutoff would re-persist that identical dead id as the
+    # next Resume-Session marker, so the next pickup fails to resume it again
+    # — forever, with zero real work done each time (confirmed live:
+    # `claude --resume <bogus-uuid>` exits 0 with exactly this shape). Detected
+    # here so the no-signal fallback below drops the dead id and starts fresh
+    # next time instead of re-resuming it.
+    RESUME_FAILED=false
+    if [ -n "$ITER_RESUME_SESSION_ID" ] \
+        && [ "$(echo "$RESULT_JSON" | jq -r '.subtype // ""')" = "error_during_execution" ] \
+        && [ "$(echo "$RESULT_JSON" | jq -r '.num_turns // 0')" = "0" ]; then
+        RESUME_FAILED=true
+        echo -e "\033[31m  --resume ${ITER_RESUME_SESSION_ID} failed (session not found) — falling back to a fresh session next pickup\033[0m"
+        RUN_SESSION_ID=""
+    fi
     ITER_IN=$(echo "$RESULT_JSON" | jq -r '.usage.input_tokens // 0' || echo "0")
     ITER_CACHE_CREATE=$(echo "$RESULT_JSON" | jq -r '.usage.cache_creation_input_tokens // 0' || echo "0")
     ITER_CACHE_READ=$(echo "$RESULT_JSON" | jq -r '.usage.cache_read_input_tokens // 0' || echo "0")
@@ -1185,7 +1204,9 @@ while true; do
             fi
         fi
         if [ "$NO_SIGNAL" = true ]; then
-            if [ -n "$RUN_SESSION_ID" ]; then
+            if [ "$RESUME_FAILED" = true ]; then
+                ITER_COMMENT="${ITER_COMMENT}<p>⚠ Could not resume the previous Claude session (<code>${ITER_RESUME_SESSION_ID}</code>) — it was no longer available. Moved back to Todo; the next pickup starts a fresh session instead of retrying the same dead one.</p>"
+            elif [ -n "$RUN_SESSION_ID" ]; then
                 _persist_resume_session "$TASK_ID" "$RUN_SESSION_ID"
                 ITER_COMMENT="${ITER_COMMENT}<p>⚠ Iteration ended with no TASK_DONE/TASK_BLOCKED signal — moved back to Todo; the next pickup will resume this exact Claude session (<code>${RUN_SESSION_ID}</code>) instead of starting cold, so it can pick back up (e.g. check on a backgrounded command it was mid-wait on) and finish properly. See the gist log above for what the agent was doing when it stopped.</p>"
             else
