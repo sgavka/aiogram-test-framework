@@ -751,8 +751,6 @@ while true; do
     RAWFILE="$LOGS_DIR/iteration-${ITERATION}.json"
     PROMPT_INPUT=$(mktemp)
 
-    cat "$PROMPT_FILE" > "$PROMPT_INPUT"
-
     # The loop owns task selection and state. Log the task, then start it.
     TASK_SEQ=$(echo "$TASK_JSON" | jq -r '.sequence_id // "?"' 2>/dev/null || echo "?")
     TASK_NAME=$(echo "$TASK_JSON" | jq -r '.name // ""' 2>/dev/null || echo "")
@@ -887,6 +885,16 @@ while true; do
     fi
     if [ -n "$ITER_RESUME_SESSION_ID" ]; then
         echo -e "\033[90m  resuming Claude session: ${ITER_RESUME_SESSION_ID}\033[0m"
+    fi
+
+    # Only prepend the full PLANE.md prompt for a fresh Claude process. A
+    # --resume of ITER_RESUME_SESSION_ID reuses the exact same conversation,
+    # which already has PLANE.md's instructions in its history from whichever
+    # iteration first started it — resending the whole prompt file on every
+    # subsequent resume just repeats tokens Claude already has. Only the
+    # latest task data (injected below) needs to go in fresh each time.
+    if [ -z "$ITER_RESUME_SESSION_ID" ]; then
+        cat "$PROMPT_FILE" > "$PROMPT_INPUT"
     fi
 
     # Inject the task JSON directly so Claude already has it and does not fetch it.
