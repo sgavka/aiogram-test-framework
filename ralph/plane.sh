@@ -158,13 +158,21 @@ _resolve_at_file() {
 # it to a temp file and read it back with --rawfile instead. Extra jq args
 # (e.g. --arg name "$name") and the filter string are forwarded as-is; the
 # filter refers to the description value as $desc.
+#
+# Plain `rm -f` at the end, deliberately not `trap ... RETURN`: a RETURN trap
+# is not scoped to this function call — it fires on every function return in
+# the whole process from the moment it's set, including the caller's own
+# `return` right after calling this. With `set -u`, that second firing dies on
+# "$tmp: unbound variable" since `tmp` no longer exists in that later scope,
+# aborting the whole script with exit 1 even though this function already
+# produced valid output. See the identical bug in _issue_with_comments below.
 _jq_with_desc() {
     local desc_html="$1"; shift
     local tmp
     tmp=$(mktemp)
-    trap 'rm -f "$tmp"' RETURN
     printf '%s' "$desc_html" > "$tmp"
     jq -n --rawfile desc "$tmp" "$@"
+    rm -f "$tmp"
 }
 
 # Update or append KEY=VALUE in .env, so a value discovered at runtime
@@ -614,6 +622,15 @@ _RECHECK_JQ='
 # of comments (confirmed live, Plane task #2479: 336 KiB on a single issue),
 # which made plain `--argjson comments "$comments"` fail with "Argument list
 # too long" and next-task return nothing at all for that issue.
+#
+# Plain `rm -f` at the end, not `trap ... RETURN` — see the gotcha on
+# _jq_with_desc above. This one bit live: every cmd_next_task/cmd_task_in_progress
+# call that actually found a task crashed on its own `return` right after this
+# function returned ("comments_tmp: unbound variable", exit 1) despite having
+# already printed the correct task JSON — ralph-plane.sh discards output on a
+# nonzero exit regardless of content, so the task was silently never picked up
+# and the loop retried "lookup failed" forever (confirmed live, Plane task
+# #2496: ikea_parser_service and vpn-plugin wedged this way for 20+ minutes).
 _issue_with_comments() {
     local pid="$1" issue_id="$2"
     local comments comments_tmp
@@ -626,11 +643,11 @@ _issue_with_comments() {
         }] | sort_by(.created_at)')
 
     comments_tmp=$(mktemp)
-    trap 'rm -f "$comments_tmp"' RETURN
     printf '%s' "$comments" > "$comments_tmp"
     _curl "$BASE/projects/$pid/issues/$issue_id/" | jq \
         --rawfile comments_raw "$comments_tmp" \
         ". + {comments: (\$comments_raw | fromjson)} | $_STRIP_NOISE"
+    rm -f "$comments_tmp"
 }
 
 # The per-task overrides Plane custom fields can carry, read by ralph and by
