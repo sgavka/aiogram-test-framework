@@ -71,10 +71,16 @@ ITERATION=0
 RALPH_DIR="$RALPH_SELF_DIR"
 PROMPT_FILE="$RALPH_DIR/PLANE.md"
 
+# This deployment's project root (one level up from docs/ralph/.../RALPH_DIR)
+# — used below as the identity a resumable Claude session is checked against
+# (see ITER_RESUME_SESSION_ID / Resume-Cwd), since a session recorded under a
+# different checkout path cannot actually be resumed from this one.
+RALPH_PROJECT_ROOT="$(dirname "$RALPH_DIR")"
+
 # Live status for the `agent` script / Telegram watcher (see ralph.md) — a fixed
 # VM-global path, not a RALPH_* config key, so every project's loop and the
 # VM-wide tooling reading across all of them agree on the same location.
-REPO_NAME="$(basename "$(dirname "$RALPH_DIR")")"
+REPO_NAME="$(basename "$RALPH_PROJECT_ROOT")"
 AGENT_STATE_DIR="/root/agent-state"
 STATE_FILE="$AGENT_STATE_DIR/${REPO_NAME}.json"
 mkdir -p "$AGENT_STATE_DIR" 2>/dev/null || true
@@ -143,35 +149,44 @@ _clear_resume_marker() {
         sleep 10
     done
     if [ -z "$issue" ]; then
-        echo "  could not re-read task $id to clear its Resume-Session marker (3 tries)" >&2
+        echo "  could not re-read task $id to clear its Resume-Session/Resume-Cwd markers (3 tries)" >&2
         return 1
     fi
     desc=$(printf '%s' "$issue" | jq -r '.description_html // ""')
-    printf '%s' "$desc" | grep -q 'Resume-Session:' || return 0
-    if ! printf '%s' "$desc" | sed -E 's#<p>Resume-Session:[^<]*</p>##g' \
+    printf '%s' "$desc" | grep -qE 'Resume-Session:|Resume-Cwd:' || return 0
+    if ! printf '%s' "$desc" | sed -E 's#<p>Resume-Session:[^<]*</p>##g; s#<p>Resume-Cwd:[^<]*</p>##g' \
         | "$RALPH_DIR/plane.sh" update-description "$id" >/dev/null 2>&1; then
-        echo "  could not write task $id's description to clear its Resume-Session marker" >&2
+        echo "  could not write task $id's description to clear its Resume-Session/Resume-Cwd markers" >&2
         return 1
     fi
 }
 
-# Record a captured Claude session id so the next pickup can --resume it: the
-# session_id custom field (read first on pickup, see TASK_FIELDS below) and the
-# Resume-Session description marker, kept as the fallback for when the field is
-# unset or cannot be written.
+# Record a captured Claude session id so the next pickup can --resume it, with
+# an explicit "resume is expected" marker/message (rate-limit/no-signal cutoff
+# — see the call sites below): the Resume-Session description marker, on top
+# of whatever _record_session already writes unconditionally every iteration.
 _persist_resume_session() {
     local id="$1" session="$2"
     printf '<p>Resume-Session: %s</p>' "$session" | "$RALPH_DIR/plane.sh" append-description "$id" >/dev/null 2>&1 || true
     _record_session "$id" "$session"
 }
 
-# Write the session_id custom field for this run's Claude session, so it is
-# visible on the task itself and not only in the stats comment. Skipped when
-# the run captured no session id.
+# Write the session_id custom field (read first on pickup, see TASK_FIELDS
+# below — the Resume-Session description marker above is only a fallback for
+# when this field is unset or unwritable) plus a Resume-Cwd description
+# marker recording this project's own checkout path (RALPH_PROJECT_ROOT), so
+# the next pickup can tell whether that session was captured under the same
+# checkout it is about to resume from. Called every iteration regardless of
+# outcome, not only on a rate-limit/no-signal cutoff — this run's session is
+# always worth recording as a resume candidate for whatever picks this task
+# up next, whether that is a rate-limit retry, a test-failure requeue, a new
+# review comment, or a brand new follow-up on the same task. Skipped when the
+# run captured no session id.
 _record_session() {
     local id="$1" session="$2"
     [ -n "$session" ] || return 0
     "$RALPH_DIR/plane.sh" set-field "$id" session_id "$session" >/dev/null 2>&1 || true
+    printf '<p>Resume-Cwd: %s</p>' "$RALPH_PROJECT_ROOT" | "$RALPH_DIR/plane.sh" append-description "$id" >/dev/null 2>&1 || true
 }
 
 # Optional per-project daily iteration cap (RALPH_MAX_ITERATIONS_PER_DAY).
@@ -830,32 +845,45 @@ while true; do
         esac
     fi
 
-    # Session-limit resume: a task's session_id custom field, or else a
-    # "Resume-Session: <uuid>" description marker, is written by this script
-    # itself (see _persist_resume_session and the rate-limit handling after the
-    # claude call below) when a previous
-    # iteration was cut short by the Claude subscription's usage limit before
-    # it could signal TASK_DONE/TASK_BLOCKED. When present, this iteration
-    # runs `claude --resume <uuid>` instead of a fresh session, so the model
-    # picks up its own prior reasoning/progress instead of starting cold —
-    # mutually exclusive in practice with ITER_RESUME (task-in-progress crash
-    # recovery) above, since a rate-limited task is moved to Todo, not left
-    # In Progress.
-    # The session_id field is also written after every iteration as a plain
-    # record of the last run's session (see _record_session), so it is only a
-    # resume source when the Resume-Session marker says the last run was cut
-    # short — otherwise a finished task re-picked after a test failure would
-    # resume a whole old conversation.
+    # Session resume: a task's session_id custom field — or, as a fallback for
+    # when that field is unset/unwritable, a "Resume-Session: <uuid>"
+    # description marker — holds the Claude session from this task's last
+    # run, written every iteration regardless of outcome (see
+    # _record_session). Reused unconditionally whenever present, not only
+    # after a rate-limit/no-signal cutoff: a task re-picked after an ordinary
+    # clean TASK_DONE (bounced back to Todo by a failed test or merge
+    # conflict, or reopened by a new review comment/follow-up) resumes that
+    # same conversation too, instead of starting cold with no memory of the
+    # prior work. A narrower version of this check (requiring the
+    # Resume-Session marker specifically, which was only ever written for the
+    # rate-limit/no-signal cases) used to miss exactly that: a session_id
+    # field value with no accompanying marker was silently never read on the
+    # next pickup. Confirmed live on Plane task #2496, which needed a second
+    # branch/PR (-v2 — see Iteration detection above) and started that
+    # iteration cold despite a usable session_id already on the task.
+    #
+    # Guarded by Resume-Cwd (also written every iteration, see
+    # _record_session): a Claude session can only be resumed from the exact
+    # project checkout path it was captured under, so a recorded path that no
+    # longer matches this deployment's own RALPH_PROJECT_ROOT (a
+    # relocated/re-cloned checkout) means `--resume` would just fail with
+    # "session not found" — skip it up front rather than paying for a doomed
+    # claude invocation. A task with no recorded path at all (written before
+    # this check existed) is treated as a match, so already-pending
+    # Resume-Session markers keep working.
     RESUME_MARKER_SESSION=$(echo "$TASK_JSON" | jq -r '.description_html // ""' \
         | grep -ioP '(?<=resume-session:)[[:space:]]*\K[0-9a-f-]{36}' | tail -1 || echo "")
-    ITER_RESUME_SESSION_ID=""
-    if [ -n "$RESUME_MARKER_SESSION" ]; then
-        ITER_RESUME_SESSION_ID=$(jq -r '.session_id // ""' <<< "$TASK_FIELDS")
-        if [ -n "$ITER_RESUME_SESSION_ID" ] && ! [[ "$ITER_RESUME_SESSION_ID" =~ ^[0-9a-f-]{36}$ ]]; then
-            echo -e "\033[33m  ignoring session_id field \"${ITER_RESUME_SESSION_ID}\" — not a session UUID\033[0m"
-            ITER_RESUME_SESSION_ID=""
-        fi
-        [ -z "$ITER_RESUME_SESSION_ID" ] && ITER_RESUME_SESSION_ID="$RESUME_MARKER_SESSION"
+    RESUME_MARKER_CWD=$(echo "$TASK_JSON" | jq -r '.description_html // ""' \
+        | grep -ioP '(?<=resume-cwd:)[[:space:]]*\K[^<]+' | tail -1 || echo "")
+    ITER_RESUME_SESSION_ID=$(jq -r '.session_id // ""' <<< "$TASK_FIELDS")
+    if [ -n "$ITER_RESUME_SESSION_ID" ] && ! [[ "$ITER_RESUME_SESSION_ID" =~ ^[0-9a-f-]{36}$ ]]; then
+        echo -e "\033[33m  ignoring session_id field \"${ITER_RESUME_SESSION_ID}\" — not a session UUID\033[0m"
+        ITER_RESUME_SESSION_ID=""
+    fi
+    [ -z "$ITER_RESUME_SESSION_ID" ] && ITER_RESUME_SESSION_ID="$RESUME_MARKER_SESSION"
+    if [ -n "$ITER_RESUME_SESSION_ID" ] && [ -n "$RESUME_MARKER_CWD" ] && [ "$RESUME_MARKER_CWD" != "$RALPH_PROJECT_ROOT" ]; then
+        echo -e "\033[33m  ignoring session ${ITER_RESUME_SESSION_ID} — recorded under a different project path (${RESUME_MARKER_CWD} vs ${RALPH_PROJECT_ROOT})\033[0m"
+        ITER_RESUME_SESSION_ID=""
     fi
     if [ -n "$ITER_RESUME_SESSION_ID" ]; then
         echo -e "\033[90m  resuming Claude session: ${ITER_RESUME_SESSION_ID}\033[0m"
@@ -1163,10 +1191,15 @@ while true; do
     fi
 
     if [ -n "$TASK_ID" ]; then
-        # Clear any Resume-Session marker left by an earlier iteration, whatever
-        # this run's own outcome (done, blocked, or no-signal again). Not only
-        # when this run was itself resuming: a marker can survive a run that
-        # never resumed. A fresh marker is appended below if this run needs one.
+        # Clear any Resume-Session/Resume-Cwd marker left by an earlier
+        # iteration, whatever this run's own outcome (done, blocked, or
+        # no-signal again) — not only when this run was itself resuming, since
+        # a marker can survive a run that never resumed. _record_session right
+        # after unconditionally re-records this run's own session (and
+        # current project path) as the next pickup's resume candidate; a
+        # further Resume-Session marker is appended below only for the
+        # rate-limit/no-signal cases that also want the explicit stats-comment
+        # messaging about it.
         _clear_resume_marker "$TASK_ID" || true
         _record_session "$TASK_ID" "$RUN_SESSION_ID"
 
