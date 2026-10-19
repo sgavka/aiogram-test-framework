@@ -834,3 +834,31 @@ class TestKeyboardFactory:
         """Test creating an empty keyboard."""
         keyboard = KeyboardFactory.create_inline_keyboard([])
         assert len(keyboard.inline_keyboard) == 0
+
+    def test_create_inline_keyboard_with_url_buttons(self):
+        """Test creating a keyboard with URL buttons."""
+        keyboard = KeyboardFactory.create_inline_keyboard_with_buttons([
+            [InlineKeyboardButton(text="Visit Website", url="https://example.com")],
+            [InlineKeyboardButton(text="OK", callback_data="ok")],
+        ])
+
+        assert isinstance(keyboard, InlineKeyboardMarkup)
+        assert len(keyboard.inline_keyboard) == 2
+        assert keyboard.inline_keyboard[0][0].text == "Visit Website"
+        assert keyboard.inline_keyboard[0][0].url == "https://example.com"
+        assert keyboard.inline_keyboard[0][0].callback_data is None
+        assert keyboard.inline_keyboard[1][0].text == "OK"
+        assert keyboard.inline_keyboard[1][0].callback_data == "ok"
+
+    def test_create_inline_keyboard_with_buttons_mixed(self):
+        """Test creating a keyboard mixing URL and callback buttons in same row."""
+        keyboard = KeyboardFactory.create_inline_keyboard_with_buttons([
+            [
+                InlineKeyboardButton(text="Link", url="https://t.me/channel"),
+                InlineKeyboardButton(text="Close", callback_data="close"),
+            ],
+        ])
+
+        assert len(keyboard.inline_keyboard[0]) == 2
+        assert keyboard.inline_keyboard[0][0].url == "https://t.me/channel"
+        assert keyboard.inline_keyboard[0][1].callback_data == "close"

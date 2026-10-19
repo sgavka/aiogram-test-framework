@@ -453,3 +453,103 @@ class TestCapturedRequest:
         repr_str = repr(request)
         assert len(repr_str) < len(long_text) + 50
         assert "..." in repr_str
+
+    def test_get_inline_buttons_empty_keyboard(self):
+        """Test get_inline_buttons returns empty list for empty keyboard."""
+        request = CapturedRequest(
+            request_type=RequestType.SEND_MESSAGE,
+            params={"chat_id": 123, "reply_markup": {"inline_keyboard": []}},
+        )
+        assert request.get_inline_buttons() == []
+
+    def test_get_inline_buttons_no_markup(self):
+        """Test get_inline_buttons returns empty list when no reply_markup."""
+        request = CapturedRequest(
+            request_type=RequestType.SEND_MESSAGE,
+            params={"chat_id": 123, "text": "Hello"},
+        )
+        assert request.get_inline_buttons() == []
+
+    def test_get_inline_buttons_callback_buttons(self):
+        """Test get_inline_buttons returns all callback buttons flattened."""
+        request = CapturedRequest(
+            request_type=RequestType.SEND_MESSAGE,
+            params={
+                "chat_id": 123,
+                "reply_markup": {
+                    "inline_keyboard": [
+                        [{"text": "Yes", "callback_data": "yes"}, {"text": "No", "callback_data": "no"}],
+                        [{"text": "Cancel", "callback_data": "cancel"}],
+                    ]
+                },
+            },
+        )
+        buttons = request.get_inline_buttons()
+        assert len(buttons) == 3
+        assert buttons[0] == {"text": "Yes", "callback_data": "yes"}
+        assert buttons[1] == {"text": "No", "callback_data": "no"}
+        assert buttons[2] == {"text": "Cancel", "callback_data": "cancel"}
+
+    def test_get_inline_buttons_url_buttons(self):
+        """Test get_inline_buttons works for URL buttons without callback_data."""
+        request = CapturedRequest(
+            request_type=RequestType.SEND_MESSAGE,
+            params={
+                "chat_id": 123,
+                "reply_markup": {
+                    "inline_keyboard": [
+                        [{"text": "Visit Website", "url": "https://example.com"}],
+                        [{"text": "Subscribe", "url": "https://t.me/channel"}],
+                    ]
+                },
+            },
+        )
+        buttons = request.get_inline_buttons()
+        assert len(buttons) == 2
+        assert buttons[0] == {"text": "Visit Website", "url": "https://example.com"}
+        assert buttons[1] == {"text": "Subscribe", "url": "https://t.me/channel"}
+
+    def test_get_button_by_text_found(self):
+        """Test get_button_by_text returns the matching button."""
+        request = CapturedRequest(
+            request_type=RequestType.SEND_MESSAGE,
+            params={
+                "chat_id": 123,
+                "reply_markup": {
+                    "inline_keyboard": [
+                        [{"text": "Visit Website", "url": "https://example.com"}],
+                        [{"text": "OK", "callback_data": "ok"}],
+                    ]
+                },
+            },
+        )
+        button = request.get_button_by_text("Visit Website")
+        assert button is not None
+        assert button["url"] == "https://example.com"
+
+        button2 = request.get_button_by_text("OK")
+        assert button2 is not None
+        assert button2["callback_data"] == "ok"
+
+    def test_get_button_by_text_not_found(self):
+        """Test get_button_by_text returns None when text doesn't match."""
+        request = CapturedRequest(
+            request_type=RequestType.SEND_MESSAGE,
+            params={
+                "chat_id": 123,
+                "reply_markup": {
+                    "inline_keyboard": [
+                        [{"text": "OK", "callback_data": "ok"}],
+                    ]
+                },
+            },
+        )
+        assert request.get_button_by_text("Cancel") is None
+
+    def test_get_button_by_text_no_markup(self):
+        """Test get_button_by_text returns None when there's no keyboard."""
+        request = CapturedRequest(
+            request_type=RequestType.SEND_MESSAGE,
+            params={"chat_id": 123, "text": "Hello"},
+        )
+        assert request.get_button_by_text("OK") is None
