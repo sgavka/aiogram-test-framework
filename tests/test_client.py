@@ -588,3 +588,129 @@ class TestTestClientForwardedMessages:
         assert forward_received[0]["signature"] == "Channel Author"
 
         await client.close()
+
+
+class TestPatchBot:
+    """Tests for the patch_bot method (support for module-level bot variables)."""
+
+    async def test_patch_bot_captures_requests(self):
+        """Test that patching a real bot makes its requests get captured."""
+        from aiogram import F
+
+        # Simulate a real bot declared at module level
+        external_bot = Bot(token="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11")
+
+        def setup(bot: Bot, dispatcher: Dispatcher) -> None:
+            router = Router()
+
+            @router.message()
+            async def handler(message: Message) -> None:
+                # Uses external_bot instead of injected bot
+                await external_bot.send_message(message.chat.id, "reply via external bot")
+
+            dispatcher.include_router(router)
+
+        client = await TestClient.create(
+            bot_token="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+            bot_id=123456,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+            setup_dispatcher_func=setup,
+        )
+        client.patch_bot(external_bot)
+
+        user = client.create_user()
+        await user.send_message("hello")
+
+        assert user.get_last_message() is not None
+        assert user.get_last_message().text == "reply via external bot"
+
+        await client.close()
+
+    async def test_patch_bot_shares_capture(self):
+        """Test that patched bot shares the same RequestCapture."""
+        external_bot = Bot(token="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11")
+
+        client = await TestClient.create(
+            bot_token="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+            bot_id=123456,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+        )
+        client.patch_bot(external_bot)
+
+        await external_bot.send_message(chat_id=100, text="captured")
+        await client.bot.send_message(chat_id=200, text="also captured")
+
+        assert len(client.capture) == 2
+
+        await client.close()
+
+    async def test_patch_multiple_bots(self):
+        """Test that multiple bots can be patched."""
+        external_bot1 = Bot(token="111111:ABC-DEF1234ghIkl-zyx57W2v1u123ew11")
+        external_bot2 = Bot(token="222222:ABC-DEF1234ghIkl-zyx57W2v1u123ew11")
+
+        client = await TestClient.create(
+            bot_token="333333:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+            bot_id=333333,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+        )
+        client.patch_bot(external_bot1)
+        client.patch_bot(external_bot2)
+
+        await external_bot1.send_message(chat_id=100, text="from bot1")
+        await external_bot2.send_message(chat_id=200, text="from bot2")
+
+        assert len(client.capture) == 2
+        texts = [r.text for r in client.capture.get_sent_messages()]
+        assert "from bot1" in texts
+        assert "from bot2" in texts
+
+        await client.close()
+
+    async def test_patch_bot_multi_user_routing(self):
+        """
+        Regression test for GitHub issue #2: when a bot routes messages between
+        users via a module-level bot variable, get_last_message() must work for
+        the recipient user.
+        """
+        USER_ID = 1
+        SUPPORT_ID = 2
+
+        real_bot = Bot(token="1:ABC-DEF1234ghIkl-zyx57W2v1u123ew11")
+
+        def setup(bot: Bot, dispatcher: Dispatcher) -> None:
+            router = Router()
+
+            @router.message()
+            async def forward(message: Message) -> None:
+                if message.from_user.id == SUPPORT_ID:
+                    await real_bot.send_message(USER_ID, "hi")
+                else:
+                    await real_bot.send_message(SUPPORT_ID, "hello")
+
+            dispatcher.include_router(router)
+
+        client = await TestClient.create(
+            bot_token="1:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+            bot_id=1,
+            bot_username="test_bot",
+            bot_first_name="Test Bot",
+            setup_dispatcher_func=setup,
+        )
+        client.patch_bot(real_bot)
+
+        user = client.create_user(USER_ID)
+        support_agent = client.create_user(SUPPORT_ID)
+
+        await support_agent.send_message("hello")
+        assert user.get_last_message() is not None
+        assert user.get_last_message().text == "hi"
+
+        await user.send_message("hello")
+        assert support_agent.get_last_message() is not None
+        assert support_agent.get_last_message().text == "hello"
+
+        await client.close()
