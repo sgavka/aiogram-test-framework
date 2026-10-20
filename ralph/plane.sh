@@ -36,7 +36,7 @@
 #   docs/plane.sh set-cancelled <id>                     — move issue to Cancelled (operator-triggered only)
 #   docs/plane.sh get-issue <id>                         — print full issue JSON, including a custom_fields key (same shape as get-fields)
 #   docs/plane.sh get-task <PROJECT-123>                 — look up an issue by its human-readable ref (e.g. TM-808) and print full issue JSON + comments; this is the ONLY command that accepts a ref — every other command below (including every set-* one) needs the UUID from this call's .id field instead. Passing a ref to one of those is not an obvious error: it returns a 404 with an all-null-fields JSON body, not a clear "not found."
-#   docs/plane.sh list-states                            — print all project states
+#   docs/plane.sh list-states                            — print all project states; also the only way to turn get-issue/get-task's `state` (a bare UUID, with no name alongside it) into a human-readable state name
 #   docs/plane.sh list-labels                            — print all project labels [{id,name}] (e.g. to find a sibling project's label for create-task)
 #   docs/plane.sh list-projects                          — print all workspace projects
 #   docs/plane.sh upload-asset <file> <issue_id> [project_id]              — upload an image/file, attached to the issue; print {asset_id, embed_html}
@@ -1859,10 +1859,24 @@ cmd_list_attachments() {
 # Dispatch
 # ---------------------------------------------------------------------------
 
+# Print the maintained `# Usage:` comment block at the top of this file. The
+# `*)` fallback below lists bare command names on one line, which is enough to
+# spot a typo but not enough to get an invocation right — the per-command
+# argument docs only exist in that header, so an explicit --help shows it
+# rather than the one-liner. Unknown commands keep the old behaviour (one-line
+# list, exit 1); only an intentional help request exits 0.
+_usage() {
+    awk '/^# Usage/{f=1} f{ if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
+    echo
+    echo "Comment and description bodies must be HTML, never Markdown."
+    echo "Only get-task accepts a PROJECT-123 ref; every other command needs the UUID from its .id field."
+}
+
 CMD="${1:-}"
 shift || true
 
 case "$CMD" in
+    -h|--help|help)      _usage ;;
     next-task)           cmd_next_task ;;
     task-in-progress)    cmd_task_in_progress ;;
     set-in-progress)     cmd_set_in_progress "${1:?issue_id required}" ;;

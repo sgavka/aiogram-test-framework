@@ -202,10 +202,18 @@ cmd_deploy() {
     gh workflow run "$workflow" --ref "$branch"
 }
 
+# See the note on plane.sh's _usage: the `*)` fallback's one-line command list
+# cannot convey each command's arguments or output values, which only the
+# header comment documents.
+_usage() {
+    awk '/^# Usage/{f=1} f{ if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
+}
+
 CMD="${1:-}"
 shift || true
 
 case "$CMD" in
+    -h|--help|help)      _usage ;;
     pr-number)           cmd_pr_number "${1:-}" ;;
     pr-url)              cmd_pr_url "${1:-}" ;;
     pr-state)            cmd_pr_state "${1:-}" ;;

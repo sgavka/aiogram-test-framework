@@ -149,14 +149,14 @@ _clear_resume_marker() {
         sleep 10
     done
     if [ -z "$issue" ]; then
-        echo "  could not re-read task $id to clear its Resume-Session/Resume-Cwd markers (3 tries)" >&2
+        echo "  could not re-read task $id to clear its Resume-Session/Resume-Cwd/No-Signal-Streak markers (3 tries)" >&2
         return 1
     fi
     desc=$(printf '%s' "$issue" | jq -r '.description_html // ""')
-    printf '%s' "$desc" | grep -qE 'Resume-Session:|Resume-Cwd:' || return 0
-    if ! printf '%s' "$desc" | sed -E 's#<p>Resume-Session:[^<]*</p>##g; s#<p>Resume-Cwd:[^<]*</p>##g' \
+    printf '%s' "$desc" | grep -qE 'Resume-Session:|Resume-Cwd:|No-Signal-Streak:' || return 0
+    if ! printf '%s' "$desc" | sed -E 's#<p>Resume-Session:[^<]*</p>##g; s#<p>Resume-Cwd:[^<]*</p>##g; s#<p>No-Signal-Streak:[^<]*</p>##g' \
         | "$RALPH_DIR/plane.sh" update-description "$id" >/dev/null 2>&1; then
-        echo "  could not write task $id's description to clear its Resume-Session/Resume-Cwd markers" >&2
+        echo "  could not write task $id's description to clear its Resume-Session/Resume-Cwd/No-Signal-Streak markers" >&2
         return 1
     fi
 }
@@ -1198,6 +1198,45 @@ while true; do
         NO_SIGNAL=true
     fi
 
+    # Stuck-resume circuit breaker: the NO_SIGNAL resume feature above exists
+    # for a transient case (the agent was legitimately mid-wait on a
+    # backgrounded command when its process died) and expects the resumed
+    # session to pick back up and finish within a retry or two. It has no
+    # built-in limit, though, so a session that is simply dead (crashed, or
+    # stuck repeating the same unproductive step every time) gets resumed
+    # forever — each retry resending the whole accumulated conversation as
+    # input tokens for a growing cost, with nothing new produced. Confirmed
+    # live on task #2509 (ats-php): a session that crashed right after
+    # `set-pr` (the actual work was already done) got resumed ~150 times over
+    # ~9 hours, cost climbing from ~$85 to ~$183, before a fresh session
+    # finally verified the PR was complete and closed the task out — see
+    # ralph-loop task #2619. Track consecutive no-signal outcomes that
+    # happened *while resuming the same session chain* via a
+    # "No-Signal-Streak: <n>" description marker (same pattern as
+    # Resume-Session/Resume-Cwd below) and, once it reaches
+    # RALPH_NO_SIGNAL_RESUME_LIMIT (default 3), stop resuming: drop the
+    # session so the next pickup starts fresh instead of retrying a dead one
+    # again. A no-signal outcome on a run that was NOT itself a resume starts
+    # the streak at 1 rather than tripping the breaker immediately.
+    NO_SIGNAL_STREAK_LIMIT="${RALPH_NO_SIGNAL_RESUME_LIMIT:-3}"
+    NO_SIGNAL_STREAK=0
+    STUCK_RESUME=false
+    if [ "$NO_SIGNAL" = true ] && [ "$RESUME_FAILED" = false ]; then
+        RESUME_MARKER_STREAK=$(echo "$TASK_JSON" | jq -r '.description_html // ""' \
+            | grep -ioP '(?<=no-signal-streak:)[[:space:]]*\K[0-9]+' | tail -1 || echo "")
+        [ -z "$RESUME_MARKER_STREAK" ] && RESUME_MARKER_STREAK=0
+        if [ -n "$ITER_RESUME_SESSION_ID" ]; then
+            NO_SIGNAL_STREAK=$((RESUME_MARKER_STREAK + 1))
+        else
+            NO_SIGNAL_STREAK=1
+        fi
+        if [ "$NO_SIGNAL_STREAK" -ge "$NO_SIGNAL_STREAK_LIMIT" ]; then
+            STUCK_RESUME=true
+            echo -e "\033[31m  resumed session ${ITER_RESUME_SESSION_ID:-$RUN_SESSION_ID} produced no signal ${NO_SIGNAL_STREAK} times in a row — dropping it, next pickup starts fresh\033[0m"
+            RUN_SESSION_ID=""
+        fi
+    fi
+
     if [ -n "$TASK_ID" ]; then
         # Clear any Resume-Session/Resume-Cwd marker left by an earlier
         # iteration, whatever this run's own outcome (done, blocked, or
@@ -1247,9 +1286,12 @@ while true; do
         if [ "$NO_SIGNAL" = true ]; then
             if [ "$RESUME_FAILED" = true ]; then
                 ITER_COMMENT="${ITER_COMMENT}<p>⚠ Could not resume the previous Claude session (<code>${ITER_RESUME_SESSION_ID}</code>) — it was no longer available. Moved back to Todo; the next pickup starts a fresh session instead of retrying the same dead one.</p>"
+            elif [ "$STUCK_RESUME" = true ]; then
+                ITER_COMMENT="${ITER_COMMENT}<p>⚠ Resumed the same Claude session ${NO_SIGNAL_STREAK} times in a row with no TASK_DONE/TASK_BLOCKED signal each time — this looks like a permanently stuck/crashed session, not a transient mid-wait. Dropping it; the next pickup starts a fresh session instead of resuming it again. See the gist log above for what the agent was doing when it stopped.</p>"
             elif [ -n "$RUN_SESSION_ID" ]; then
                 _persist_resume_session "$TASK_ID" "$RUN_SESSION_ID"
-                ITER_COMMENT="${ITER_COMMENT}<p>⚠ Iteration ended with no TASK_DONE/TASK_BLOCKED signal — moved back to Todo; the next pickup will resume this exact Claude session (<code>${RUN_SESSION_ID}</code>) instead of starting cold, so it can pick back up (e.g. check on a backgrounded command it was mid-wait on) and finish properly. See the gist log above for what the agent was doing when it stopped.</p>"
+                printf '<p>No-Signal-Streak: %s</p>' "$NO_SIGNAL_STREAK" | "$RALPH_DIR/plane.sh" append-description "$TASK_ID" >/dev/null 2>&1 || true
+                ITER_COMMENT="${ITER_COMMENT}<p>⚠ Iteration ended with no TASK_DONE/TASK_BLOCKED signal (${NO_SIGNAL_STREAK}/${NO_SIGNAL_STREAK_LIMIT} consecutive) — moved back to Todo; the next pickup will resume this exact Claude session (<code>${RUN_SESSION_ID}</code>) instead of starting cold, so it can pick back up (e.g. check on a backgrounded command it was mid-wait on) and finish properly. See the gist log above for what the agent was doing when it stopped.</p>"
             else
                 ITER_COMMENT="${ITER_COMMENT}<p>⚠ Iteration ended with no TASK_DONE/TASK_BLOCKED signal and no session id was captured — moved back to Todo; the next pickup starts a fresh session. See the gist log above for what the agent was doing when it stopped.</p>"
             fi
