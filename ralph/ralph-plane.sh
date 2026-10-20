@@ -189,6 +189,23 @@ _record_session() {
     printf '<p>Resume-Cwd: %s</p>' "$RALPH_PROJECT_ROOT" | "$RALPH_DIR/plane.sh" append-description "$id" >/dev/null 2>&1 || true
 }
 
+# Explicitly blank the session_id custom field for a dead/dropped session.
+# TASK_FIELDS.session_id (read into ITER_RESUME_SESSION_ID at the top of the
+# loop) takes priority over the Resume-Session description marker, so
+# clearing only the description marker (_clear_resume_marker) while leaving
+# this field set means the very next pickup reads the same dead session id
+# straight back out of the field and resumes it anyway — the drop never
+# actually takes effect. Confirmed live: ats-php task #2583 cycled through
+# ~80 no-op iterations alternating "resume dead session" / "drop it, starting
+# fresh" for about 2 hours, because RESUME_FAILED/STUCK_RESUME below only
+# ever blanked the local RUN_SESSION_ID variable (which _record_session
+# no-ops on when empty) and never this field. Call this wherever a session is
+# being dropped, alongside the existing RUN_SESSION_ID="" assignment.
+_drop_session_field() {
+    local id="$1"
+    "$RALPH_DIR/plane.sh" set-field "$id" session_id "" >/dev/null 2>&1 || true
+}
+
 # Optional per-project daily iteration cap (RALPH_MAX_ITERATIONS_PER_DAY).
 # Persisted outside the process (this loop runs forever, but the counter must
 # survive a restart within the same day) as "<local-date>:<count>" so a new
@@ -1057,6 +1074,7 @@ while true; do
         RESUME_FAILED=true
         echo -e "\033[31m  --resume ${ITER_RESUME_SESSION_ID} failed (session not found) — falling back to a fresh session next pickup\033[0m"
         RUN_SESSION_ID=""
+        [ -n "$TASK_ID" ] && _drop_session_field "$TASK_ID"
     fi
     ITER_IN=$(echo "$RESULT_JSON" | jq -r '.usage.input_tokens // 0' || echo "0")
     ITER_CACHE_CREATE=$(echo "$RESULT_JSON" | jq -r '.usage.cache_creation_input_tokens // 0' || echo "0")
@@ -1234,6 +1252,7 @@ while true; do
             STUCK_RESUME=true
             echo -e "\033[31m  resumed session ${ITER_RESUME_SESSION_ID:-$RUN_SESSION_ID} produced no signal ${NO_SIGNAL_STREAK} times in a row — dropping it, next pickup starts fresh\033[0m"
             RUN_SESSION_ID=""
+            [ -n "$TASK_ID" ] && _drop_session_field "$TASK_ID"
         fi
     fi
 
