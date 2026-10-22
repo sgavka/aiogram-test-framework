@@ -826,10 +826,17 @@ while true; do
     # like opus/sonnet/haiku/fable, or a full model id) to run just this task on
     # a different model than RALPH_MODEL — e.g. a cheap/simple follow-up task on
     # haiku. Falls back to the configured default when absent.
+    # The negative lookbehinds for "[x] "/"[ ] " exclude a checklist item like
+    # "[x] Model: add comment property, fillable, casts" (step 0.1's own
+    # checklist convention, referring to an Eloquent Model layer, not a
+    # per-task override) — without them this matched "add" as a model name,
+    # which resolve_model_alias passes through unresolved, so every iteration
+    # ran `claude --model add`, failed instantly (0 tokens, 1 turn), and the
+    # task cycled forever (Plane task #2736 / TM-2716, 2026-10-22).
     TASK_MODEL_RAW=$(jq -r '.model // ""' <<< "$TASK_FIELDS")
     if [ -z "$TASK_MODEL_RAW" ]; then
         TASK_MODEL_RAW=$(echo "$TASK_JSON" | jq -r '.description_html // ""' \
-            | grep -ioP '(?<=model:)[[:space:]]*\K[a-z0-9._-]+' | tail -1 || echo "")
+            | grep -ioP '(?<!\[x\] )(?<!\[ \] )model:[[:space:]]*\K[a-z0-9._-]+' | tail -1 || echo "")
     fi
     ITER_MODEL="$MODEL"
     if [ -n "$TASK_MODEL_RAW" ]; then
@@ -842,10 +849,11 @@ while true; do
     # depth than RALPH_EFFORT — e.g. "Effort: low" on a small, well-specified
     # follow-up, or "Effort: xhigh" on a genuinely hard one. Falls back to the
     # configured default when absent or invalid.
+    # Same checklist-collision guard as the model override above.
     TASK_EFFORT_RAW=$(jq -r '.effort // ""' <<< "$TASK_FIELDS")
     if [ -z "$TASK_EFFORT_RAW" ]; then
         TASK_EFFORT_RAW=$(echo "$TASK_JSON" | jq -r '.description_html // ""' \
-            | grep -ioP '(?<=effort:)[[:space:]]*\K[a-z]+' | tail -1 || echo "")
+            | grep -ioP '(?<!\[x\] )(?<!\[ \] )effort:[[:space:]]*\K[a-z]+' | tail -1 || echo "")
     fi
     ITER_EFFORT="$EFFORT"
     if [ -n "$TASK_EFFORT_RAW" ]; then
