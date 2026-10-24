@@ -10,6 +10,7 @@ Development loop using Plane.so as the task board. **The task you must work on i
   - ✅ RIGHT: `add-comment <id> "<p><a href=\"https://github.com/x/pull/57\">PR #57</a></p>"`.
   - Before every `add-comment`, re-read the body: if it contains `[`…`](`, `**`, `` ` ``, or a leading `- `, rewrite it as HTML first.
 - **If a comment or the description asks a question, answer it in a comment** (`add-comment`). Do not answer only in your response.
+- **Keep the description small.** It is state — the `Branch:`/`Blocked by:`/`Model:`/`Effort:`/`Recheck-after:` tags, the PR link, and a short checklist — not a notebook. Investigation findings, progress notes, and anything else that reads as prose belong in a comment, not appended to the description. Prefer several small, focused comments over one long one.
 - **If you hit an infrastructure problem** — cannot run code, tests fail to start, missing Python dependencies, pip install failures, aiogram version incompatibilities — **post a comment describing the problem** (what you ran, the error) so the operator sees it, then signal completion.
 - **When mentioning code in comments/descriptions, link to it on GitHub** using HTML anchors and full permalinks: `<a href="https://github.com/sgavka/aiogram-test-framework/blob/<branch>/<path>#L<line>">UserService.handle()</a>`
 
@@ -190,11 +191,11 @@ PR_STATE=$(ralph/github.sh pr-state "$BRANCH")
 
 3.1. Read `name` and `description_html` to understand the task.
 
-3.2. **If the description is short** (no checklist, no investigation notes, no clear subtasks) — investigate the relevant code first, then write findings back into the description before touching code:
+3.2. **If the description is short** (no checklist, no investigation notes, no clear subtasks) — investigate the relevant code first, then post the findings as a comment and append only a short checklist to the description (per the "Keep the description small" rule above, the investigation prose itself does not belong in the description):
 
 ```bash
-CURRENT_HTML=$(ralph/plane.sh get-issue <id> | jq -r '.description_html // ""')
-printf '<hr/><p><strong>Investigation:</strong></p><p>…</p><p><strong>Checklist:</strong></p><p>[ ] subtask 1</p><p>[ ] subtask 2</p>' | ralph/plane.sh append-description <id>
+ralph/plane.sh add-comment <id> "<p><strong>Investigation:</strong></p><p>…</p>"
+printf '<p><strong>Checklist:</strong></p><p>[ ] subtask 1</p><p>[ ] subtask 2</p>' | ralph/plane.sh append-description <id>
 ```
 
 If questions surface during investigation, post them as a comment and stop — this "post and stop" pattern (comment, then emit the completion signal, nothing else) recurs at every stopping point below:
