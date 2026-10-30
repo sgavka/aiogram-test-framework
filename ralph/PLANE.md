@@ -233,6 +233,8 @@ Append `(review)` after the sequence id (`Blocked by: #<blocker_sequence_id> (re
 3.4. If questions arise before writing code, post them as a comment and stop the same way.
 3.5. Implement following all project rules in `CLAUDE.md`. After each checklist item, mark it done in the description (step 0.1 #3). Keep the implementation itself terse: prefer refactoring (clearer names, smaller functions, extracted helpers) over adding comments, and write a comment only when the why is genuinely non-obvious (a hidden constraint, a workaround) — never to restate what the code already does.
 
+Commit as you go, not once at the end: each commit should be one small, self-contained logical change — small enough that its own diff is easy to read on its own. See *Commit rules* at the bottom for the message format (why/where/what) and types. Local history on this branch is a draft, not a record: before pushing, freely `git commit --amend`, squash, reorder, or reword any commit you have not pushed yet if it makes the final history easier to follow — optimize for what a reviewer reads, not for preserving every intermediate step you actually took. Never rewrite a commit that is already pushed and part of an open PR.
+
 **Never act on a background command's output before it has actually finished.** If a command (a test run, a build, anything started with the backgrounding option) is still running, do not edit files, draw conclusions, or move to the next step based on its partial/incomplete output — block until it completes before reading its result. That means either running it in the foreground so the tool call itself blocks, or, if it must be backgrounded, actively polling your own bounded `sleep N && <status-check>` loop and reading the full, untruncated status each check (a `| tail -N` read of a still-running command's log is exactly the kind of partial output this rule forbids, even if it looks conclusive). Saying "I'll wait for this to finish" and then continuing with other work anyway is worse than not backgrounding it at all, since it produces changes made on wrong or incomplete information without any indication that happened.
 
 **This iteration is a single non-interactive process — nothing outside it will ever wake it back up.** Do not call a scheduled-wakeup/notification tool (e.g. `ScheduleWakeup`) or otherwise assume a backgrounded command (a deploy, `gh run watch`, a long build) will notify you or resume your session when it finishes. There is no scheduler watching this run; if the turn ends before the command completes, that wait is simply lost, not resumed — the loop's next iteration starts a brand-new session with no memory of it. If a command is genuinely too slow to finish within one iteration, treat it as a stopping point instead of idling: say in a comment what you started and what is still pending, then stop (`TASK_DONE`, or `TASK_BLOCKED` if later work must gate on it finishing).
@@ -258,12 +260,19 @@ Fix all reported test failures. **If a test cannot run at all** (missing depende
 
 **Never push to `master` or `master`.** Always push to the feature branch.
 
+If you already committed incrementally during step 3.5 (the normal case), just push:
+```bash
+git push origin <branch>
+```
+
+Otherwise commit now, splitting unrelated changes into separate commits — see *Commit rules* below for the message format:
 ```bash
 git add -p
 git commit -m "feat: <short description>
 
-- Detail 1;
-- Detail 2."
+Why: <reason this change was needed>
+Where: <file(s)/area touched>
+What: <the concrete change made>"
 git push origin <branch>
 ```
 
@@ -318,12 +327,16 @@ Either signal starts a fresh session for the next task; without one, the loop st
 
 ## Commit rules
 
+### Granularity
+Prefer several small commits over one large one — each commit should be one logical change, scoped tightly enough that its diff is easy to read on its own (see step 3.5). Use `git add -p` to split unrelated edits in the same file into separate commits. Local, unpushed commits on your branch are a draft: amend, squash, reorder, or reword them freely before pushing if it makes the history clearer — do not treat "I already committed it" as a reason to leave a messy commit as-is. Once a commit is pushed as part of an open PR, leave it alone rather than rewriting it.
+
 ### Format
 ```
 type: short description
 
-- Detailed point 1;
-- Detailed point 2.
+Why: <the motivation — the bug, the ask, or the constraint being satisfied>
+Where: <the file(s)/component/area this commit touches>
+What: <the concrete change made>
 ```
 
 ### Types
