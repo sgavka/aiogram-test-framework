@@ -9,7 +9,7 @@
 #   docs/plane.sh set-label <id> <label>                  — replace an issue's labels with a single label (name or UUID) — e.g. to fix a task routed to the wrong sibling project
 #   docs/plane.sh set-priority <id> <priority>            — change an existing issue's priority (urgent|high|medium|low|none) — e.g. an operator bumping a task via Telegram's /setpriority
 #   docs/plane.sh list-review                            — Review-state tasks [{id,sequence_id,name,description_html}]
-#   docs/plane.sh list-blocked                           — Todo tasks held back by an unresolved "Blocked by: #<seq>" reference, with each blocker's sequence_id/name/state/url and whether it is a plain (Done) or "(review)" gate; each blocked task also carries its own url. The read-only counterpart to next-task's blocker gate; evaluates blockers regardless of PLANE_RESPECT_BLOCKERS
+#   docs/plane.sh list-blocked                           — Todo tasks held back by an unresolved "Blocked by: #<seq>" reference and/or a pending "Recheck-after:" date (each task carries `blocked`/`recheck_after`, distinguishing the two); for a blocker reference also its sequence_id/name/state/url and whether it is a plain (Done) or "(review)" gate. Each entry also carries its own url. The read-only counterpart to next-task's blocker gate; evaluates both gates regardless of PLANE_RESPECT_BLOCKERS
 #   docs/plane.sh add-comment <id> [html]                — post a comment on an issue (body must be HTML; read from stdin if omitted)
 #   docs/plane.sh get-comments <id>                      — list all comments on an issue as JSON
 #   docs/plane.sh update-description <id>                — replace description_html (reads new HTML from stdin)
@@ -585,12 +585,36 @@ _BLOCKER_JQ='
     | {blocked: (map(.resolved) | all | not), blockers: .}
 '
 
-# jq program shared by next-task's blocker walk: given a candidate's
-# description_html (as $desc) and the current moment (as $today,
+# Builds the {<sequence_id>: <state id>} map _BLOCKER_JQ's $seqmap needs,
+# writes it to a fresh temp file and prints that file's path — a caller
+# passes it on to jq via --rawfile + fromjson rather than --argjson, same
+# reasoning as _jq_with_desc's temp-file dance: this map covers every issue
+# project-wide (see the "must see every issue's state" note on its callers
+# below), and a single --argjson string is capped by MAX_ARG_STRLEN (128
+# KiB) regardless of jq's overall process argv headroom. Fixed-width state
+# UUIDs alone stay under that for any project seen so far, but confirmed
+# live: the sibling map list-blocked builds from the same issues fetch,
+# keyed the same way but valued by issue *name* instead of a fixed-width
+# id, hit exactly this ("jq: Argument list too long") on k8s-stack's 2653
+# issues the day it grew enough for names to add up — so every per-project,
+# per-issue map here goes through a file, not argv, even the ones currently
+# under the limit, rather than waiting for each one individually to cross it.
+_write_seq_map_file() {
+    local issues_file="$1" value_field="$2"
+    local out
+    out=$(mktemp)
+    jq -c --arg f "$value_field" '[.results[] | {(.sequence_id | tostring): .[$f]}] | add // {}' "$issues_file" > "$out"
+    printf '%s' "$out"
+}
+
+# jq program shared by next-task's blocker walk and list-blocked: given a
+# candidate's description_html (as $desc) and the current moment (as $today,
 # "YYYY-MM-DDTHH:MM", Kyiv local like the Recheck-after value it is compared
-# with), emit {pending: bool} — true when the description
-# carries a "Recheck-after: <YYYY-MM-DD>" or "Recheck-after:
-# <YYYY-MM-DD>T<HH:MM>" convention whose date/time has not yet arrived. The
+# with), emit {pending: bool, date: string|null} — pending true when the
+# description carries a "Recheck-after: <YYYY-MM-DD>" or "Recheck-after:
+# <YYYY-MM-DD>T<HH:MM>" convention whose date/time has not yet arrived (date
+# is the matched value regardless of pending, so list-blocked can show it
+# even once reached — next-task only reads .pending). The
 # time part is optional so a bare date still means "any time that day" — a
 # short recheck (e.g. "check again in 30 minutes") needs the T<HH:MM> to
 # avoid waiting until the following day. Mirrors the "Blocked by:"
@@ -609,7 +633,7 @@ _BLOCKER_JQ='
 # not "[T ]".
 _RECHECK_JQ='
     ($desc | [scan("(?i)recheck[- ]after:?\\s*([0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2})?)")] | last) as $date
-    | {pending: ($date != null and $date[0] > $today)}
+    | {pending: ($date != null and $date[0] > $today), date: ($date[0] // null)}
 '
 
 # Fetch an issue by id and append its comments, as next-task/task-in-progress
@@ -756,10 +780,10 @@ cmd_next_task() {
     # lower-priority task because of exactly this. Mirrors list-blocked's
     # existing unfiltered seqmap fetch below, kept lean (state only, no
     # labels/priority/description) since this runs on every next-task call.
-    local seqmap_tmp seq_to_state
+    local seqmap_tmp seqmap_file
     seqmap_tmp=$(mktemp)
     _all_issues "$pid" "id,sequence_id,state" > "$seqmap_tmp"
-    seq_to_state=$(jq -c '[.results[] | {(.sequence_id | tostring): .state}] | add // {}' "$seqmap_tmp")
+    seqmap_file=$(_write_seq_map_file "$seqmap_tmp" "state")
     rm -f "$seqmap_tmp"
 
     local today
@@ -774,11 +798,11 @@ cmd_next_task() {
     while IFS= read -r id; do
         [ -n "$id" ] || continue
         desc=$(_get_desc "$pid" "$id")
-        blocked=$(jq -n --arg desc "$desc" --argjson seqmap "$seq_to_state" \
+        blocked=$(jq -n --arg desc "$desc" --rawfile seqmap_raw "$seqmap_file" \
             --argjson resolved "$resolved_ids" --argjson resolved_review "$resolved_review_ids" \
-            "$_BLOCKER_JQ | .blocked")
+            "(\$seqmap_raw | fromjson) as \$seqmap | $_BLOCKER_JQ | .blocked")
         [ "$blocked" = "true" ] && continue
-        overrides=$(_task_overrides "$pid" "$id") || exit 1
+        overrides=$(_task_overrides "$pid" "$id") || { rm -f "$seqmap_file"; exit 1; }
         recheck_at=$(jq -r '.re_check_after // ""' <<< "$overrides")
         if [ -n "$recheck_at" ]; then
             if [[ "$recheck_at" > "$today" ]]; then continue; fi
@@ -786,20 +810,24 @@ cmd_next_task() {
             recheck_pending=$(jq -n --arg desc "$desc" --arg today "$today" "$_RECHECK_JQ | .pending")
             if [ "$recheck_pending" = "true" ]; then continue; fi
         fi
+        rm -f "$seqmap_file"
         _issue_with_comments "$pid" "$id"
         return
     done <<< "$candidate_ids"
 
+    rm -f "$seqmap_file"
     echo '{"done": true, "message": "all candidate tasks are blocked by unresolved dependencies or a pending recheck date"}'
     exit 0
 }
 
-# Todo tasks held back by an unresolved "Blocked by: #<seq>" reference, with
-# each blocker's sequence_id, state and whether it is a "(review)" gate. This
-# is the read-only counterpart to next-task's blocker gate: when next-task says
-# "all candidate tasks are blocked by unresolved dependencies", this says which
-# tasks and what they are waiting on. Unlike next-task it always evaluates
-# blockers, whatever PLANE_RESPECT_BLOCKERS is set to.
+# Todo tasks held back by an unresolved "Blocked by: #<seq>" reference or a
+# pending "Recheck-after:" date, mirroring both gates next-task itself walks
+# past (see cmd_next_task) — not just the blocker one. When next-task says
+# "all candidate tasks are blocked by unresolved dependencies or a pending
+# recheck date", this says which tasks, and whether each is waiting on another
+# task or just scheduled for later; a task with neither is omitted. Unlike
+# next-task it always evaluates both gates, whatever PLANE_RESPECT_BLOCKERS is
+# set to.
 cmd_list_blocked() {
     local pid
     pid=$(_project_id)
@@ -821,16 +849,20 @@ cmd_list_blocked() {
     issues_tmp=$(mktemp)
     _all_issues "$pid" "id,sequence_id,name,state,labels,priority" > "$issues_tmp"
 
-    local resolved_ids resolved_review_ids seq_to_state seq_to_name seq_to_id state_names url_prefix
+    local resolved_ids resolved_review_ids seqstate_file seqname_file seqid_file state_names url_prefix
     resolved_ids=$(echo "$states" | jq -c '[.results[] | select(.group == "completed" or .group == "cancelled") | .id]')
     resolved_review_ids=$(echo "$states" | jq -c '[.results[] | select(.group == "completed" or .group == "cancelled" or (.name | test("review"; "i"))) | .id]')
-    seq_to_state=$(jq -c '[.results[] | {(.sequence_id | tostring): .state}] | add // {}' "$issues_tmp")
-    seq_to_name=$(jq -c '[.results[] | {(.sequence_id | tostring): .name}] | add // {}' "$issues_tmp")
-    seq_to_id=$(jq -c '[.results[] | {(.sequence_id | tostring): .id}] | add // {}' "$issues_tmp")
+    seqstate_file=$(_write_seq_map_file "$issues_tmp" "state")
+    seqname_file=$(_write_seq_map_file "$issues_tmp" "name")
+    seqid_file=$(_write_seq_map_file "$issues_tmp" "id")
     state_names=$(echo "$states" | jq -c '[.results[] | {(.id): .name}] | add // {}')
     # Same shape as cmd_task_url, built inline so every entry/blocker below
     # can carry a ready-to-click link without a per-row task-url call.
     url_prefix="https://$PLANE_HOST/$PLANE_USERNAME/projects/$pid/issues/"
+
+    local today
+    # Kyiv wall time, same clock the Recheck-after: description convention is written in.
+    today=$(TZ=Europe/Kyiv date +%Y-%m-%dT%H:%M)
 
     local candidates
     candidates=$(jq -c --arg ids "$todo_ids" --arg lbl "$label_id" '
@@ -843,20 +875,38 @@ cmd_list_blocked() {
     ' "$issues_tmp")
     rm -f "$issues_tmp"
 
-    local out="[]" id seq name priority desc verdict entry
+    local out="[]" id seq name priority desc verdict blocked overrides recheck_at recheck entry
     while IFS=$'\t' read -r id seq name priority; do
         [ -n "$id" ] || continue
         desc=$(_get_desc "$pid" "$id")
-        verdict=$(jq -n --arg desc "$desc" --argjson seqmap "$seq_to_state" \
+        verdict=$(jq -n --arg desc "$desc" --rawfile seqmap_raw "$seqstate_file" \
             --argjson resolved "$resolved_ids" --argjson resolved_review "$resolved_review_ids" \
-            "$_BLOCKER_JQ")
-        [ "$(printf '%s' "$verdict" | jq -r '.blocked')" = "true" ] || continue
+            "(\$seqmap_raw | fromjson) as \$seqmap | $_BLOCKER_JQ")
+        blocked=$(printf '%s' "$verdict" | jq -r '.blocked')
+
+        # Same custom-field-first, description-fallback resolution as
+        # cmd_next_task's recheck gate (see _task_overrides) — a task's
+        # re_check_after custom field, when set, takes precedence over its
+        # own "Recheck-after:" description text.
+        overrides=$(_task_overrides "$pid" "$id") || { rm -f "$seqstate_file" "$seqname_file" "$seqid_file"; exit 1; }
+        recheck_at=$(jq -r '.re_check_after // ""' <<< "$overrides")
+        if [ -n "$recheck_at" ]; then
+            recheck=$(jq -cn --arg d "$recheck_at" --arg today "$today" '{pending: ($d > $today), date: $d}')
+        else
+            recheck=$(jq -n --arg desc "$desc" --arg today "$today" "$_RECHECK_JQ")
+        fi
+
+        [ "$blocked" = "true" ] || [ "$(printf '%s' "$recheck" | jq -r '.pending')" = "true" ] || continue
+
         entry=$(jq -n --arg id "$id" --argjson seq "$seq" --arg name "$name" --arg priority "$priority" \
-            --arg urlprefix "$url_prefix" \
-            --argjson verdict "$verdict" --argjson names "$seq_to_name" --argjson snames "$state_names" --argjson ids "$seq_to_id" '
+            --arg urlprefix "$url_prefix" --argjson blocked "$blocked" \
+            --argjson verdict "$verdict" --argjson recheck "$recheck" \
+            --rawfile names_raw "$seqname_file" --argjson snames "$state_names" --rawfile ids_raw "$seqid_file" '
+            ($names_raw | fromjson) as $names | ($ids_raw | fromjson) as $ids |
             {
                 id: $id, sequence_id: $seq, name: $name, priority: $priority,
                 url: ($urlprefix + $id + "/"),
+                blocked: $blocked,
                 blocked_by: ($verdict.blockers | map(
                     (.id | tostring) as $bseq |
                     {
@@ -867,10 +917,12 @@ cmd_list_blocked() {
                         resolved: .resolved,
                         url: (if $ids[$bseq] then ($urlprefix + $ids[$bseq] + "/") else null end)
                     }
-                ))
+                )),
+                recheck_after: (if $recheck.pending then $recheck.date else null end)
             }')
         out=$(jq -c -n --argjson acc "$out" --argjson e "$entry" '$acc + [$e]')
     done < <(printf '%s' "$candidates" | jq -r '.[] | [.id, .sequence_id, .name, .priority] | @tsv')
+    rm -f "$seqstate_file" "$seqname_file" "$seqid_file"
 
     printf '%s\n' "$out" | jq '.'
 }
