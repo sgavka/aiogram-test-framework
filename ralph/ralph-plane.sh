@@ -462,6 +462,21 @@ check_claude_limits() {
     # already treats an empty match as "near limit", so this is a pure crash fix.
     CLAUDE_SESSION_PCT=$(printf '%s' "$clean" | grep "Current session:" | sed -n 's/.*: \([0-9]*\)% used.*/\1/p') || true
     CLAUDE_WEEK_PCT=$(printf '%s' "$clean" | grep "Current week (all models):" | sed -n 's/.*: \([0-9]*\)% used.*/\1/p') || true
+    # Claude Code 2.1.x dropped the "Current session"/"Current week" lines from
+    # `claude -p "/usage"` (it now prints only a "what is contributing" breakdown),
+    # so the text parse above yields nothing and every loop blocked forever at the
+    # 99 default. Fall back to the same OAuth usage endpoint the TUI uses.
+    if [ -z "$CLAUDE_SESSION_PCT" ] || [ -z "$CLAUDE_WEEK_PCT" ]; then
+        local tok api
+        tok=$(jq -r '.claudeAiOauth.accessToken // empty' "$HOME/.claude/.credentials.json" 2>/dev/null) || tok=""
+        if [ -n "$tok" ]; then
+            api=$(curl -s -m 20 https://api.anthropic.com/api/oauth/usage \
+                -H "Authorization: Bearer $tok" -H "anthropic-beta: oauth-2025-04-20" \
+                -H "User-Agent: claude-code/2.1" 2>/dev/null) || api=""
+            [ -z "$CLAUDE_SESSION_PCT" ] && CLAUDE_SESSION_PCT=$(printf '%s' "$api" | jq -r '.five_hour.utilization // empty | floor' 2>/dev/null) || true
+            [ -z "$CLAUDE_WEEK_PCT" ] && CLAUDE_WEEK_PCT=$(printf '%s' "$api" | jq -r '.seven_day.utilization // empty | floor' 2>/dev/null) || true
+        fi
+    fi
     CLAUDE_SESSION_PCT="${CLAUDE_SESSION_PCT:-99}"
     CLAUDE_WEEK_PCT="${CLAUDE_WEEK_PCT:-99}"
 }
