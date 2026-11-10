@@ -231,7 +231,7 @@ Append `(review)` after the sequence id (`Blocked by: #<blocker_sequence_id> (re
 
 3.3. Investigate the relevant code (if not done in 3.2).
 3.4. If questions arise before writing code, post them as a comment and stop the same way.
-3.5. Implement following all project rules in `CLAUDE.md`. After each checklist item, mark it done in the description (step 0.1 #3). Keep the implementation itself terse: prefer refactoring (clearer names, smaller functions, extracted helpers) over adding comments, and write a comment only when the why is genuinely non-obvious (a hidden constraint, a workaround) — never to restate what the code already does.
+3.5. Implement following all project rules in `CLAUDE.md`. After each checklist item, mark it done in the description (step 0.1 #3). Zero prose comments is mandatory, not a preference. Prefer refactoring (clearer names, smaller functions, extracted helpers) over adding a comment. The only comment allowed to remain is one stating a genuinely non-obvious why (a hidden constraint, a workaround for a specific bug, behavior that would surprise a reader) — never one that restates what the code already does. Before finishing, re-read every comment already in every file this task touches, not just lines you added, and delete any that fails that bar, even if it predates this task.
 
 Commit as you go, not once at the end: each commit should be one small, self-contained logical change — small enough that its own diff is easy to read on its own. See *Commit rules* at the bottom for the message format (why/where/what) and types. Local history on this branch is a draft, not a record: before pushing, freely `git commit --amend`, squash, reorder, or reword any commit you have not pushed yet if it makes the final history easier to follow — optimize for what a reviewer reads, not for preserving every intermediate step you actually took. Never rewrite a commit that is already pushed and part of an open PR.
 
@@ -306,11 +306,21 @@ Before signalling done, you must reflect on this iteration against all four of t
 - **The ralph loop itself** — this `PLANE.md` prompt, and the `plane.sh`/`github.sh`/other helper scripts alongside it — was a step ambiguous, a helper command missing, or something in the loop unnecessary or out of order?
 - **Command discoverability** — for every shell command you ran this iteration, ralph-related (`plane.sh`, `github.sh`, other helper scripts) or project-related (a build/test/lint/deploy script, etc.): could you tell how to invoke it correctly from its documented usage/help text alone, or did you have to open and read the `.sh` file's source to get the invocation right? Needing to read the source to use a command correctly is itself a finding — flag it (missing `--help`/usage comment, undocumented flag, `CLAUDE.md` not mentioning the script at all).
 
-The reflection itself is never skipped. Only post a comment if it turned up something concrete to suggest — do not post a comment that just says nothing was found:
+The reflection itself is never skipped. If it turns up nothing concrete, do nothing further — no comment, no branch, no PR.
+
+If it does turn up something concrete and fixable in this repo, fix it directly instead of just describing it — do not post a comment about it on this task; the explanation belongs in the commits and the PR, not in Plane:
 
 ```bash
-ralph/plane.sh add-comment <id> "<p>CLAUDE.md / skills / ralph loop suggestions:</p><ul><li>…</li></ul>"
+git checkout master
+git pull origin master
+git checkout -b chore/<sequence_id>_ralph-loop-findings
+# one small commit per finding — see *Commit rules* for the message format
+git push origin chore/<sequence_id>_ralph-loop-findings
+ralph/github.sh create-pr master chore/<sequence_id>_ralph-loop-findings "<title>" "<body listing each finding>"
+git checkout <branch>   # back to this task's own branch before continuing — skip if step 1 was skipped (no task branch), stay on master instead
 ```
+
+Keep this on its own branch and PR, separate from this task's own branch/PR from step 6 — never mix a finding fix into this task's commits. Do not call `set-pr`/`set-branch` for it; those are reserved for the task's own PR recorded in step 6.
 
 ### 8. Cleanup
 
