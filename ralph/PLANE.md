@@ -120,20 +120,23 @@ printf '<hr/><p><strong>Checklist:</strong></p><p>[ ] <item></p>' | ralph/plane.
 Mark it done in the description and (for PR threads) resolve the GitHub conversation. `update-description` replaces the **whole** description, so do the substitution in Python with an assertion on the match count, and keep the HTML in a file:
 
 ```bash
+DESC_TMP=$(mktemp)
 ralph/plane.sh get-issue <id> | python3 -c "
 import json, sys
 h = json.load(sys.stdin)['description_html']
 old = '<p>[ ] fix X'                      # a distinctive prefix of the item, not the whole line
 assert h.count(old) == 1, f'matched {h.count(old)} times - refusing to guess'
-open('/tmp/desc.html', 'w').write(h.replace(old, old.replace('[ ]', '[x]'), 1))
-"
-ralph/plane.sh update-description <id> < /tmp/desc.html
+open('$DESC_TMP', 'w').write(h.replace(old, old.replace('[ ]', '[x]'), 1))
+" && ralph/plane.sh update-description <id> < "$DESC_TMP"
+rm -f "$DESC_TMP"
 
 # Resolve the GitHub thread (if this item came from a PR review)
 ralph/github.sh resolve-thread <thread_id>
 ```
 
 The obvious `jq -r '.description_html' | sed 's/\[ \] x/[x] x/'` one-liner fails **silently** in three ways, and since the whole description is re-uploaded there is no partial-failure to notice: a `sed` that matches nothing still exits 0 (item stays `[ ]`, no error anywhere); `sed`'s `/` delimiter and regex metacharacters break on item text containing a path or URL; and `$(...)` puts KBs of HTML through command substitution, stripping trailing newlines. Adding a *new* item carries none of this risk — `append-description` is a plain append.
+
+**Use `mktemp`, never a fixed path like `/tmp/desc.html`, and chain with `&&` rather than a bare newline between the write and the upload.** Confirmed live on an affiliate-system-1 ralph task: the python assertion failed (the checklist text it was matching against had only ever been posted as a comment, never appended to the description), so the `open(...).write(...)` line never ran — but a fixed `/tmp/desc.html` left over from a *different, unrelated* task's prior session still had that other task's HTML sitting in it, and the next line ran `update-description < /tmp/desc.html` unconditionally regardless of the python script's exit code, uploading that unrelated task's entire description over this one's. `/tmp` is shared machine-wide across every task/session, so a fixed filename is a landmine the moment two tasks ever use this snippet back to back — `mktemp` plus `&&` makes a failed assertion stop the pipeline before any upload happens, instead of silently shipping whatever garbage was already on disk.
 
 #### 4. Detect merge instruction
 
@@ -169,7 +172,7 @@ ralph/plane.sh set-branch <id> <branch>
 If the description already contains a `Branch: <code>…</code>` tag (written by `set-branch` in a prior iteration), this task is continuing. Detect the existing PR state:
 
 ```bash
-BRANCH=$(ralph/plane.sh get-issue <id> | jq -r '.description_html' | grep -oP 'Branch: <code[^>]*>\K[^<]+' | tail -1)
+BRANCH=$(ralph/plane.sh get-issue <id> | jq -r '.description_html' | grep -oP 'Branch:\s*(?:<code[^>]*>)?\K[^<]+' | tail -1)
 PR_STATE=$(ralph/github.sh pr-state "$BRANCH")
 ```
 

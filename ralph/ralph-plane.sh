@@ -497,7 +497,7 @@ sweep_failed_tests() {
         id=$(echo "$review_json" | jq -r ".[$i].id")
         seq=$(echo "$review_json" | jq -r ".[$i].sequence_id // \"?\"")
         branch=$(echo "$review_json" | jq -r ".[$i].description_html // \"\"" \
-            | grep -oP 'Branch: <code[^>]*>\K[^<]+' | tail -1 || echo "")
+            | grep -oP 'Branch:\s*(?:<code[^>]*>)?\K[^<]+' | tail -1 || echo "")
         [ -z "$branch" ] && continue
         status=$("$RALPH_DIR/github.sh" tests-status "$branch" 2>/dev/null || echo "NONE")
         if [ "$status" = "FAILURE" ]; then
@@ -535,7 +535,7 @@ sweep_merge_conflicts() {
         id=$(echo "$review_json" | jq -r ".[$i].id")
         seq=$(echo "$review_json" | jq -r ".[$i].sequence_id // \"?\"")
         branch=$(echo "$review_json" | jq -r ".[$i].description_html // \"\"" \
-            | grep -oP 'Branch: <code[^>]*>\K[^<]+' | tail -1 || echo "")
+            | grep -oP 'Branch:\s*(?:<code[^>]*>)?\K[^<]+' | tail -1 || echo "")
         [ -z "$branch" ] && continue
         mergeable=$("$RALPH_DIR/github.sh" mergeable "$branch" 2>/dev/null || echo "NONE")
         if [ "$mergeable" = "CONFLICTING" ]; then
@@ -801,7 +801,7 @@ while true; do
     # is already assigned) so the agent does not have to fetch them itself every
     # iteration (formerly PLANE.md.tpl step 0.1's manual unresolved-threads call).
     TASK_BRANCH=$(echo "$TASK_JSON" | jq -r '.description_html // ""' \
-        | grep -oP 'Branch: <code[^>]*>\K[^<]+' | tail -1 || echo "")
+        | grep -oP 'Branch:\s*(?:<code[^>]*>)?\K[^<]+' | tail -1 || echo "")
     PR_THREADS="[]"
     if [ -n "$TASK_BRANCH" ]; then
         PR_THREADS=$("$RALPH_DIR/github.sh" unresolved-threads "$TASK_BRANCH" 2>/dev/null || echo "[]")
